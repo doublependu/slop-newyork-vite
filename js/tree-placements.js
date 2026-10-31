@@ -6,7 +6,7 @@ function hashPos(x, y, z) {
 }
 
 // Fit surveyed street trees to the modeled curbs, preserving nearby park and plaza trees.
-function placeStreetTrees(points, existingSites, isClear) {
+function* placeStreetTreesSteps(points, existingSites, isClear) {
   const cells = new Map();
   const insert = (site) => {
     const key = Math.floor(site.x / 4) + ',' + Math.floor(site.z / 4);
@@ -28,6 +28,7 @@ function placeStreetTrees(points, existingSites, isClear) {
 
   const sites = [];
   for (let i = 0; i < points.length; i += 2) {
+    if ((i & 510) === 0) yield;
     const sourceX = points[i], sourceZ = points[i + 1];
     const originalBlock = blockAt(sourceX, sourceZ);
     if (originalBlock && (originalBlock.park > 0.6 || originalBlock.median)) continue;
@@ -83,4 +84,11 @@ function placeStreetTrees(points, existingSites, isClear) {
   return sites;
 }
 
-export { placeStreetTrees };
+function placeStreetTrees(points, existingSites, isClear) {
+  const job = placeStreetTreesSteps(points, existingSites, isClear);
+  let step = job.next();
+  while (!step.done) step = job.next();
+  return step.value;
+}
+
+export { placeStreetTrees, placeStreetTreesSteps };

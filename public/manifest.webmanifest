@@ -1,0 +1,8 @@
+{
+  "name": "Slop New York",
+  "short_name": "Slop NY",
+  "start_url": "./",
+  "display": "fullscreen",
+  "background_color": "#0c0d10",
+  "theme_color": "#0c0d10"
+}

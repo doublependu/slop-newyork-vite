@@ -862,7 +862,7 @@ function createTreeClearance(colliders) {
  * `update(cameraPosition)` from the frame loop to keep each tree's level of detail up to date. Returns
  * { group, material, atlas, sites (accepted placements), update(cameraPosition) }.
  */
-function createTreeField(_scene, sites, colliders = []) {
+function* createTreeFieldSteps(_scene, sites, colliders = []) {
   const group = new THREE.Group();
   group.name = 'Trees';
   const atlas = createLeafAtlas();
@@ -915,7 +915,9 @@ function createTreeField(_scene, sites, colliders = []) {
 
   const dummy = new THREE.Object3D();
   const tint = new THREE.Color();
-  sites.forEach((t) => {
+  let placed = 0;
+  for (const t of sites) {
+    if ((++placed & 255) === 0) yield;
     const sp = Math.min(SPECIES.length - 1, Math.max(0, t.species || 0));
     const r1 = hashPos(t.x, 1.3, t.z);
     const r2 = hashPos(t.z, 7.1, t.x);
@@ -928,7 +930,7 @@ function createTreeField(_scene, sites, colliders = []) {
     dummy.updateMatrix();
     const tree = treeBounds[sp][variant];
     worldBounds.copy(tree.bounds).applyMatrix4(dummy.matrix).expandByScalar(tree.margin);
-    if (!clearOfBuildings(worldBounds)) return;
+    if (!clearOfBuildings(worldBounds)) continue;
     const i = N++;
     plantedSites.add(t);
     dummy.matrix.toArray(mats, i * 16);
@@ -965,7 +967,7 @@ function createTreeField(_scene, sites, colliders = []) {
       meshOf[i * 3 + l] = index;
       meshes[index].capacity++;
     }
-  });
+  }
 
   // Finalize per-cell 3D bounding spheres, tier cutoffs, and typed index arrays for cell-hierarchical LOD checks.
   const cellList = Array.from(cells.values(), (cell) => {
@@ -1213,7 +1215,9 @@ function createTreeField(_scene, sites, colliders = []) {
   }
 
   // Levels for the start-up view (Midtown, 5th Ave), so the precompile pass sees the tree meshes
+  yield;
   update(new V3(0, 10, 140));
+  yield;
 
   // Precompile one visible representative per geometry; the other cells use exactly the same pipeline.
   for (const type of types) {
@@ -1236,4 +1240,11 @@ function createTreeField(_scene, sites, colliders = []) {
   return { group, material, atlas, update, meshes: instanced, stats, sites: plantedSites };
 }
 
-export { createTreeField, createLeafAtlas, buildTreeGeometries, SPECIES as TREE_SPECIES };
+function createTreeField(_scene, sites, colliders = []) {
+  const job = createTreeFieldSteps(_scene, sites, colliders);
+  let step = job.next();
+  while (!step.done) step = job.next();
+  return step.value;
+}
+
+export { createTreeField, createTreeFieldSteps, createLeafAtlas, buildTreeGeometries, SPECIES as TREE_SPECIES };

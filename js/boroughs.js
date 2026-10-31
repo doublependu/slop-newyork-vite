@@ -3314,7 +3314,7 @@ function createLandmarkMaterials() {
  * columns stand only on blocks. Returns the colliders of the bridge parts standing on Manhattan (anchorages, piers,
  * columns, deck ends too low to drive under).
  */
-function buildBoroughs(scene, { sidewalks = [] } = {}) {
+function* buildBoroughs(scene, { sidewalks = [] } = {}) {
   const t0 = performance.now();
   const group = new THREE.Group();
   group.name = 'Boroughs';
@@ -3331,18 +3331,27 @@ function buildBoroughs(scene, { sidewalks = [] } = {}) {
   group.add(landMesh, wallMesh, ridgeMesh);
 
   // Buildings (generic grid blocks + skyline signatures + island & landmark buildings) in chunked instanced meshes
+  yield;
   registerLandmarkExclusions();
   const { list, stats } = generateBoroughBuildings();
+  yield;
   const parts = createPartCollector();
   const lm = createLandmarkMaterials();
   addIslandBuildings(list);
+  yield;
   buildStatueOfLiberty(parts, lm);
+  yield;
   buildEllisIsland(parts, lm, list);
+  yield;
   buildGovernorsIsland(parts, lm, list, landMat, group);
+  yield;
   buildBoroughLandmarks(parts, lm, list, group);
+  yield;
   const buildingMat = createBoroughBuildingMaterial();
   for (const mesh of buildBuildingChunks(list, buildingMat, 1200, 'BoroughBuildings')) group.add(mesh);
+  yield;
   parts.build(group);
+  yield;
 
   // East River bridges, and the Roosevelt Island Tramway beside the Queensboro Bridge (before the island's trees,
   // which keep out from under its cabins)
@@ -3350,13 +3359,19 @@ function buildBoroughs(scene, { sidewalks = [] } = {}) {
   const bridgeMats = createBridgeMaterials();
   const bridgeParts = createPartCollector();
   const tram = buildRooseveltTram(group, bridgeParts, lm);
+  yield;
   buildIslandTrees(group);
+  yield;
   for (const spec of EAST_RIVER_BRIDGES) {
     if (spec.type === 'suspension') buildSuspensionBridge(group, bridgeParts, spec, bridgeMats);
     else if (spec.type === 'brooklyn') buildBrooklynBridge(group, bridgeParts, spec, bridgeMats);
     else if (spec.type === 'cantilever') buildQueensboroBridge(group, spec, bridgeMats);
+    yield;
   }
-  for (const spec of OUTER_BRIDGES) buildOuterBridge(group, bridgeParts, spec, bridgeMats);
+  for (const spec of OUTER_BRIDGES) {
+    buildOuterBridge(group, bridgeParts, spec, bridgeMats);
+    yield;
+  }
   bridgeParts.build(group, { castShadow: true });
 
   scene.add(group);

@@ -21,10 +21,11 @@ function partyWallHeight(record, a, b, neighbours) {
 }
 
 // One merged facade/roof mesh per 1 km cell. Explicit wall coordinates keep window bays metre-sized on any angle.
-function createBuildingFootprints(material, records, getNeighbours) {
+function* createBuildingFootprintsSteps(material, records, getNeighbours) {
   const cells = new Map();
-  records.forEach((record, index) => {
-    if (!(record.height > 0)) return;
+  for (const [index, record] of records.entries()) {
+    yield;
+    if (!(record.height > 0)) continue;
     const key = Math.floor(record.cx / 1000) + ',' + Math.floor(record.cz / 1000);
     let cell = cells.get(key);
     if (!cell) cells.set(key, (cell = { positions: [], normals: [], indices: [], boxes: [], walls: [] }));
@@ -73,12 +74,13 @@ function createBuildingFootprints(material, records, getNeighbours) {
       }
       for (const [a, b, c] of triangles) cell.indices.push(offset + a, offset + c, offset + b);
     }
-  });
+  }
 
   const group = new THREE.Group();
   group.name = 'SurveyedBuildings';
   let first;
   for (const cell of cells.values()) {
+    yield;
     if (cell.indices.length === 0) continue;
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(cell.positions, 3));
@@ -99,4 +101,11 @@ function createBuildingFootprints(material, records, getNeighbours) {
   return group;
 }
 
-export { createBuildingFootprints };
+function createBuildingFootprints(material, records, getNeighbours) {
+  const job = createBuildingFootprintsSteps(material, records, getNeighbours);
+  let step = job.next();
+  while (!step.done) step = job.next();
+  return step.value;
+}
+
+export { createBuildingFootprints, createBuildingFootprintsSteps };

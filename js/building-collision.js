@@ -11,7 +11,25 @@ function polygonContains(polygon, x, z) {
 }
 
 // Test the actual outline, including courtyards, after the caller's cheap bounds check.
+const boundsCache = new WeakMap();
+
+function polygonBounds(polygon) {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of polygon.outer) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  return { minX, maxX, minZ, maxZ };
+}
+
 function polygonBoxOverlaps(polygon, x, z, hx, hz, cs = 1, sn = 0) {
+  // Most candidates miss outright; a rotated box stays within its radius of (x, z)
+  let bounds = boundsCache.get(polygon);
+  if (!bounds) boundsCache.set(polygon, (bounds = polygonBounds(polygon)));
+  const reach = Math.hypot(hx, hz);
+  if (x + reach < bounds.minX || x - reach > bounds.maxX || z + reach < bounds.minZ || z - reach > bounds.maxZ) return false;
   if (polygonContains(polygon, x, z)) return true;
   for (let r = -1; r < polygon.holes.length; r++) {
     const ring = r < 0 ? polygon.outer : polygon.holes[r];

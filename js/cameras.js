@@ -17,6 +17,16 @@ const CAMERA_PRESETS = [
   { id: 'drone',       name: 'Auto-Director Aerial',     category: 'scenic', fov: 50 }
 ];
 
+// A preset's vertical FOV alone leaves a tall phone looking through a slot, so widen it to keep this much across.
+const MIN_HORIZONTAL_FOV = 48;
+
+function fittedFov(verticalFov, aspect) {
+  const radians = Math.PI / 180;
+  const across = 2 * Math.atan(Math.tan((verticalFov * radians) / 2) * aspect) / radians;
+  if (across >= MIN_HORIZONTAL_FOV) return verticalFov;
+  return 2 * Math.atan(Math.tan((MIN_HORIZONTAL_FOV * radians) / 2) / aspect) / radians;
+}
+
 class CameraSystem {
   constructor(domElement, controllerManager) {
     this.domElement = domElement;
@@ -118,7 +128,7 @@ class CameraSystem {
     const preset = CAMERA_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
     this.activePresetId = preset.id;
-    this.camera.fov = preset.fov;
+    this.camera.fov = fittedFov(preset.fov, this.camera.aspect);
     this.camera.updateProjectionMatrix();
     if (snapImmediately) {
       this.initialized = false;
@@ -163,6 +173,7 @@ class CameraSystem {
 
   onResize(width, height) {
     this.camera.aspect = width / height;
+    this.camera.fov = fittedFov(this.getActivePreset().fov, this.camera.aspect);
     this.camera.updateProjectionMatrix();
   }
 

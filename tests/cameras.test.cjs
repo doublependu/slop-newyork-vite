@@ -240,3 +240,20 @@ test('teleport releases every camera pointer and ignores old gestures before acc
   close(h.camera.orbitYawOffset, -0.065);
   assert.equal(h.camera.isDragging, true);
 });
+
+test('portrait screens widen the view instead of looking through a slot', () => {
+  const radians = Math.PI / 180;
+  const across = (fov, aspect) => 2 * Math.atan(Math.tan((fov * radians) / 2) * aspect) / radians;
+  const h = cameraHarness();
+  h.camera.onResize(1600, 900);
+  assert.equal(h.camera.camera.fov, 56, 'landscape keeps the preset as authored');
+
+  h.camera.onResize(390, 844);
+  assert.ok(Math.abs(across(h.camera.camera.fov, 390 / 844) - 48) < 0.01, 'keeps 48 degrees across in portrait');
+
+  h.camera.setCameraPreset('waterfront', true);
+  assert.ok(Math.abs(across(h.camera.camera.fov, 390 / 844) - 48) < 0.01, 'preset changes keep it too');
+
+  h.camera.onResize(1600, 900);
+  assert.equal(h.camera.camera.fov, 46, 'rotating back restores the preset');
+});

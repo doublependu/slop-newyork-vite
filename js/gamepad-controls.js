@@ -116,7 +116,7 @@ class GamepadControls {
     const edge = (i) => pressed[i] && !this.previousButtons[i] && !this.suppressedButtons[i];
     const held = (i) => pressed[i] && !this.suppressedButtons[i];
     // Capture edges before callbacks: changing mode or opening the map may synchronously call reset().
-    const toggleMap = edge(9), closeMap = edge(1);
+    const toggleMap = edge(9), closeMap = edge(1), togglePause = edge(8);
     const cycleMode = Number(Boolean(edge(5))) - Number(Boolean(edge(4)));
     const cycleCamera = edge(3), recenter = edge(11);
     this.previousButtons = pressed;
@@ -130,6 +130,11 @@ class GamepadControls {
     }
 
     const revision = this.revision;
+    if (togglePause) {
+      this.controller.clearGamepadInput();
+      this.callbacks.onTogglePause?.();
+      return;
+    }
     if (toggleMap) {
       this.controller.clearGamepadInput();
       this.callbacks.onToggleMap?.();
@@ -137,7 +142,7 @@ class GamepadControls {
     }
     if (!this.enabled) {
       this.controller.clearGamepadInput();
-      for (let i = 0; i < BUTTON_COUNT; i++) if (i !== 1 && i !== 9) this.suppressedButtons[i] = pressed[i];
+      for (let i = 0; i < BUTTON_COUNT; i++) if (i !== 1 && i !== 8 && i !== 9) this.suppressedButtons[i] = pressed[i];
       if (closeMap) this.callbacks.onCloseMap?.();
       return;
     }

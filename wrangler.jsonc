@@ -1,0 +1,6 @@
+{
+  "name": "slop-newyork-vite",
+  "compatibility_date": "2026-10-30",
+  "preview_urls": false,
+  "assets": { "directory": "./dist" }
+}

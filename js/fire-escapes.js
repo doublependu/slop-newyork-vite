@@ -319,7 +319,7 @@ export function createFireEscapes(group) {
         const b = buckets[i];
         if (b.count === 0) {
           if (i === 0) {
-            // Keep one underground stand-in on the primary mesh so precompileShaders() and the warm-up frame
+            // Keep one underground stand-in on the primary mesh so the shader precompile (main.js) and the first frames
             // always compile both beauty and shadow pipelines even if the player spawns away from pre-war blocks.
             dummy.rotation.set(0, 0, 0);
             dummy.position.set(originX, -10000, originZ);

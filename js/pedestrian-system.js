@@ -11,7 +11,7 @@ const PED_SPAWN_DISTANCE = 150;
 const PED_AVOID_INTERVAL = 0.12;
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
-function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCross, walkOn, visible, nearView }) {
+function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCross, walkOn, visible, nearView, numPeds = NUM_PEDS }) {
   let clock = 0;
   let focusX = 0, focusZ = 140;
   let hasView = false;
@@ -25,13 +25,13 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
 
   // One instanced draw per level of detail; every pedestrian has a PersonRig that plants its footsteps on the
   // sidewalk (no sliding), with their own build, height, sex, hair, clothes and gait
-  const pedCrowd = new PersonCrowd(NUM_PEDS);
+  const pedCrowd = new PersonCrowd(numPeds);
   const hash = (i, salt) => {
     const v = Math.sin(i * 12.9898 + salt * 78.233) * 43758.5453;
     return v - Math.floor(v);
   };
   const peds = [];
-  for (let i = 0; i < NUM_PEDS; i++) {
+  for (let i = 0; i < numPeds; i++) {
     const female = hash(i, 1) < 0.48;
     const hairRoll = hash(i, 2);
     peds.push({
@@ -630,12 +630,12 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
 
     for (const n of walkedNodes) n.walkers.length = 0;
     walkedNodes.length = 0;
-    let pedBudget = jump ? NUM_PEDS : 6;
+    let pedBudget = jump ? numPeds : 6;
     const keepRadius = jump ? NEAR_RADIUS : PED_RADIUS;
     const keepRadiusSq = keepRadius * keepRadius;
-    for (let scanned = 0; scanned < NUM_PEDS && pedBudget > 0; scanned++) {
+    for (let scanned = 0; scanned < numPeds && pedBudget > 0; scanned++) {
       const p = peds[pedCursor];
-      pedCursor = (pedCursor + 1) % NUM_PEDS;
+      pedCursor = (pedCursor + 1) % numPeds;
       if (p.placed) {
         const dx = p.x - focusX, dz = p.z - focusZ;
         if (dx * dx + dz * dz <= keepRadiusSq) continue;
@@ -643,14 +643,14 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
       pedBudget--;
       spawnPed(p, jump ? 0 : 60, jump ? NEAR_RADIUS : 280, !jump);
     }
-    for (let i = 0; i < NUM_PEDS; i++) {
+    for (let i = 0; i < numPeds; i++) {
       const p = peds[i];
       if (p.placed) avoidPlayer(p);
     }
     meet(dt);
     gatherCurbs();
     pedCrowd.begin();
-    for (let i = 0; i < NUM_PEDS; i++) {
+    for (let i = 0; i < numPeds; i++) {
       const p = peds[i];
       if (!p.placed) continue;
       walk(p, dt);
@@ -659,7 +659,17 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     pedCrowd.end();
   }
 
-  return { peds, meshes: pedCrowd.meshes, update };
+  // The first placement of everyone, spread over frames (a teleport does the same in one go, in update())
+  function* populate(x, z) {
+    focusX = x;
+    focusZ = z;
+    for (const p of peds) {
+      if (!p.placed) spawnPed(p, 0, NEAR_RADIUS, false);
+      yield;
+    }
+  }
+
+  return { peds, meshes: pedCrowd.meshes, update, populate };
 }
 
 export { createPedestrianSystem };

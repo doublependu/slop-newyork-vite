@@ -26,7 +26,7 @@ import {
 import { PersonCrowd, PersonRig } from './pedestrians.js';
 import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from './vehicle-lights.js';
 import { bryantParkLawn } from './landmarks.js';
-import { polygonContact } from './building-collision.js';
+import { polygonContact, polygonContains } from './building-collision.js';
 
 // Player models, animation and movement for walking, driving, cycling and flying.
 
@@ -189,6 +189,9 @@ function createNYLicensePlateTexture() {
   tex.anisotropy = 16;
   return tex;
 }
+
+const COLLIDER_CELL = 48;
+const colliderKey = (ix, iz) => (ix + 4096) * 8192 + (iz + 4096);
 
 class ThirdPersonControllerManager {
   constructor(scene, colliders = []) {
@@ -875,23 +878,33 @@ class ThirdPersonControllerManager {
     return 0.0;
   }
 
+  // Collision arrives with each stage of the city
+  addColliders(colliders) {
+    for (const c of colliders) {
+      this.colliders.push(c);
+      if (this._colliderCells) this._indexCollider(c, this.colliders.length - 1);
+    }
+  }
+
+  _indexCollider(c, order) {
+    c._order = order;
+    for (let ix = Math.floor(c.minX / COLLIDER_CELL); ix <= Math.floor(c.maxX / COLLIDER_CELL); ix++) {
+      for (let iz = Math.floor(c.minZ / COLLIDER_CELL); iz <= Math.floor(c.maxZ / COLLIDER_CELL); iz++) {
+        const k = colliderKey(ix, iz);
+        let list = this._colliderCells.get(k);
+        if (!list) this._colliderCells.set(k, (list = []));
+        list.push(c);
+      }
+    }
+  }
+
   // Static colliders within `r` of (x, z), kept in their original order and indexed once into 48 m cells.
   nearColliders(x, z, r) {
-    const CELL = 48;
-    const key = (ix, iz) => (ix + 4096) * 8192 + (iz + 4096);
+    const CELL = COLLIDER_CELL;
+    const key = colliderKey;
     if (!this._colliderCells) {
       this._colliderCells = new Map();
-      this.colliders.forEach((c, i) => {
-        c._order = i;
-        for (let ix = Math.floor(c.minX / CELL); ix <= Math.floor(c.maxX / CELL); ix++) {
-          for (let iz = Math.floor(c.minZ / CELL); iz <= Math.floor(c.maxZ / CELL); iz++) {
-            const k = key(ix, iz);
-            let list = this._colliderCells.get(k);
-            if (!list) this._colliderCells.set(k, (list = []));
-            list.push(c);
-          }
-        }
-      });
+      this.colliders.forEach((c, i) => this._indexCollider(c, i));
       this._nearList = [];
       this._nearStamp = 0;
     }
@@ -911,6 +924,24 @@ class ThirdPersonControllerManager {
     }
     if (out.length > 1) out.sort((a, b) => a._order - b._order);
     return out;
+  }
+
+  // The top of the highest roof directly below altitude y, or 0 over open ground. Without this, sinking onto a building
+  // reads as flying into its side: the horizontal collision throws the helicopter off the edge.
+  roofHeightAt(x, z, y) {
+    let top = 0;
+    if (!this.colliders?.length) return top;
+    for (const c of this.nearColliders(x, z, 1)) {
+      if (!(c.maxY <= y + 0.5) || c.maxY <= top) continue;
+      if (x < c.minX || x > c.maxX || z < c.minZ || z > c.maxZ) continue;
+      if (c.polygon && !polygonContains(c.polygon, x, z)) continue;
+      if (c.obb) {
+        const dx = x - c.obb.cx, dz = z - c.obb.cz;
+        if (Math.abs(dx * c.obb.cs - dz * c.obb.sn) > c.obb.hx || Math.abs(dx * c.obb.sn + dz * c.obb.cs) > c.obb.hz) continue;
+      }
+      top = c.maxY;
+    }
+    return top;
   }
 
   resolveHorizontalCollision(pos, radius, carEntity = null, entity = carEntity) {
@@ -1322,12 +1353,14 @@ class ThirdPersonControllerManager {
 
     h.position.x += Math.sin(h.heading) * h.speed * dt;
     h.position.z += Math.cos(h.heading) * h.speed * dt;
+    const floor = this.roofHeightAt(h.position.x, h.position.z, h.position.y) + 0.25; // its skids rest on the roof
     h.position.y += h.verticalSpeed * dt;
 
-    if (h.position.y < 0.25) {
-      this.reportCollision(h, groundCollider, 'ground', h.position.x, 0.25, h.position.z, 0, 1, 0, -h.verticalSpeed);
+    if (h.position.y < floor) {
+      this.reportCollision(h, groundCollider, 'ground', h.position.x, floor, h.position.z, 0, 1, 0, -h.verticalSpeed);
+      h.verticalSpeed = Math.max(0, h.verticalSpeed);
     }
-    h.position.y = Math.max(0.25, Math.min(380, h.position.y));
+    h.position.y = Math.max(floor, Math.min(380, h.position.y));
     this.resolveHorizontalCollision(h.position, 4.5, null, h);
 
     const targetPitch = (h.speed / maxHorizSpeed) * 0.24;

@@ -109,6 +109,10 @@ function chunkInstancedMesh(mesh, cell) {
 
     const chunk = new THREE.InstancedMesh(geo, mesh.material, ids.length);
     ids.forEach((id, j) => chunk.instanceMatrix.array.set(src.subarray(id * 16, id * 16 + 16), j * 16));
+    // The city is still drawing while this runs: a chunk has to bind its matrices the way the shader it shares expects
+    if (mesh.instanceMatrix.isStorageInstancedBufferAttribute) {
+      chunk.instanceMatrix = new THREE.StorageInstancedBufferAttribute(chunk.instanceMatrix.array, 16);
+    }
     if (mesh.instanceColor) {
       const c = mesh.instanceColor.array;
       const arr = new Float32Array(ids.length * 3);
@@ -146,7 +150,7 @@ function replaceWithChunks(mesh, cell) {
  * Sets up the culling of the static city under `roots` (Object3Ds). `shadow` is the SunLightShadow whose cascade
  * cameras render the shadow stand-ins (none are made without it). Per-frame culling runs in updateSceneCulling().
  */
-function setupSceneCulling(scene, roots, shadow = null) {
+function* setupSceneCullingSteps(scene, roots, shadow = null, storageInstancing = false) {
   scene.updateMatrixWorld(true);
   const culled = [];
 
@@ -197,6 +201,7 @@ function setupSceneCulling(scene, roots, shadow = null) {
       const sphere = chunk.boundingSphere.clone().applyMatrix4(chunk.matrixWorld);
       pushCulled(chunk, sphere, cullDist);
     }
+    yield;
   }
 
   // 2. Shadow stand-ins for the big static casters
@@ -258,6 +263,7 @@ function setupSceneCulling(scene, roots, shadow = null) {
     }
 
     for (const o of sources) {
+      yield;
       const side = sideOf(o.material);
       const geo = o.userData.shadowStandIn?.isBufferGeometry ? o.userData.shadowStandIn : o.geometry;
       if (o.isInstancedMesh) {
@@ -322,9 +328,11 @@ function setupSceneCulling(scene, roots, shadow = null) {
         const n = list.length / 16;
         const mesh = new THREE.InstancedMesh(entry.geometry, entry.material, n);
         mesh.instanceMatrix.array.set(list);
+        if (storageInstancing) mesh.instanceMatrix = new THREE.StorageInstancedBufferAttribute(mesh.instanceMatrix.array, 16);
         mesh.computeBoundingSphere();
         addProxy(mesh);
       }
+      yield;
     }
     for (const [side, bySide] of triCells) {
       for (const list of bySide.values()) {
@@ -333,6 +341,7 @@ function setupSceneCulling(scene, roots, shadow = null) {
         g.computeBoundingSphere();
         addProxy(new THREE.Mesh(g, proxyMaterial(side)));
       }
+      yield;
     }
     for (const cam of cams) cam.layers.enable(SHADOW_PROXY_LAYER);
   }
@@ -341,22 +350,34 @@ function setupSceneCulling(scene, roots, shadow = null) {
   // These large objects stay visible at any distance and need no per-frame distance checks.
   for (const mesh of largeMeshes) {
     if (!mesh.castShadow) replaceWithChunks(mesh, STATIC_CELL);
+    yield;
   }
 
   state.culled = culled;
 }
 
-const state = { culled: [] };
+function setupSceneCulling(scene, roots, shadow = null) {
+  const job = setupSceneCullingSteps(scene, roots, shadow);
+  let step = job.next();
+  while (!step.done) step = job.next();
+}
 
-// Per frame (after the warm-up frame, which must see everything): hide the chunks beyond their cull distance
+const state = { culled: [], distanceScale: 1 };
+
+function setDrawDistance(scale) {
+  state.distanceScale = scale;
+}
+
+// Per frame: hide the chunks beyond their cull distance
 function updateSceneCulling(cameraPosition) {
   const { x, y, z } = cameraPosition;
+  const scaleSq = state.distanceScale * state.distanceScale;
   for (const c of state.culled) {
     const dx = c.x - x;
     const dy = c.y - y;
     const dz = c.z - z;
-    c.mesh.visible = dx * dx + dy * dy + dz * dz < c.maxDistSq;
+    c.mesh.visible = dx * dx + dy * dy + dz * dz < c.maxDistSq * scaleSq;
   }
 }
 
-export { setupSceneCulling, updateSceneCulling, SHADOW_PROXY_LAYER };
+export { setDrawDistance, setupSceneCulling, setupSceneCullingSteps, updateSceneCulling, SHADOW_PROXY_LAYER };

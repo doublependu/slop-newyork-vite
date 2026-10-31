@@ -1,26 +1,27 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, output, normalView, positionView, metalness, roughness, vec2, smoothstep } from 'three/tsl';
+import { pass, mrt, output, normalView, positionView, metalness, roughness, vec2, vec3, smoothstep } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { createPostProcessing } from './post-processing.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
-import { getLocationLabel, isTypingInField, ROADS, NYC_LANDMARKS, TELEPORT_LOCATIONS } from './city-config.js';
+import { avenueX, getLocationLabel, isTypingInField, streetZ, ROADS, NYC_LANDMARKS, TELEPORT_LOCATIONS } from './city-config.js';
 import { buildCityGrid } from './city-grid.js';
-import { buildBoroughs } from './boroughs.js';
 import { buildLandmarks } from './landmarks.js';
 import { buildCityBlocks } from './buildings.js';
-import { buildStreetDetails } from './street-details.js';
-import { createTrafficSystem, createHighwayTraffic } from './traffic.js';
-import { buildRoadPaint } from './road-paint.js';
 import { ThirdPersonControllerManager } from './controllers.js';
 import { TouchControls } from './touch-controls.js';
 import { GamepadControls } from './gamepad-controls.js';
 import { CameraSystem, CAMERA_PRESETS } from './cameras.js';
 import { LightingSystem } from './lighting.js';
 import { NYCMapSystem } from './nyc-map.js';
-import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
+import { setDrawDistance, setupSceneCullingSteps, updateSceneCulling } from './scene-culling.js';
 import { CityAudioSystem } from './audio-system.js';
+import { PauseMenu } from './pause-menu.js';
+import { CHOICES, FrameWatcher, detectQuality, saveChoice } from './quality.js';
+import { createLightPools } from './light-pools.js';
+import { WorldBuilder, runUntilReady } from './world-jobs.js';
+import { fullscreenElement, fullscreenSupported, onFullscreenChange, toggleFullscreen } from './fullscreen.js';
 
-// Application setup, shader warm-up and frame loop.
+// Application setup, background city build and frame loop.
 
 async function initApp() {
   const container = document.getElementById('canvas-container');
@@ -49,26 +50,43 @@ async function initApp() {
     });
   }
 
+  // Signs are drawn to canvases with Inter during the city build. A slow font must not hold the game back, though.
+  const fontsReady = Promise.race([
+    document.fonts?.load('800 16px Inter').catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 1000))
+  ]);
+
+  // iOS ignores user-scalable=no in the viewport meta; these are the events it lets a page cancel instead.
+  for (const type of ['gesturestart', 'gesturechange', 'dblclick']) {
+    document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+  }
+
   await showLoadingStage('Initializing graphics...');
 
-  // 1. Initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer
+  // 1. Pick the graphics level, then initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer
+  const quality = await detectQuality();
   const renderer = new THREE.WebGPURenderer({
-    antialias: true,
+    antialias: quality.msaa,
     powerPreference: 'high-performance',
     reversedDepthBuffer: true
   });
-  renderer.setPixelRatio(1.0);
+  renderer.setPixelRatio(quality.pixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.enabled = quality.shadowTile > 0;
   renderer.lighting = new ClusteredLighting(256, 32, 28, 48);
   container.appendChild(renderer.domElement);
 
+  let interactive = false; // set once the loading screen drops
+  let worldBuilder = null;
+  let worldCompleteAt = null;
+  let interactiveAt = null;
+
   // Start-up phase timings (logged once as "[init] ...") to keep load-time regressions traceable
-  let initTimings = [];
+  const initTimings = [];
   let initMark = performance.now();
   const markInit = (label) => {
     const now = performance.now();
-    initTimings.push(`${label} ${Math.round(now - initMark)}ms`);
+    initTimings.push([label, Math.round(now - initMark)]);
     initMark = now;
   };
 
@@ -78,45 +96,26 @@ async function initApp() {
   // 2. Scene, atmosphere and lighting
   await showLoadingStage('Creating sky and environment lighting...');
   const scene = new THREE.Scene();
-  const lightingSystem = new LightingSystem(scene, renderer);
+  const lightingSystem = new LightingSystem(scene, renderer, { shadowTile: quality.shadowTile || 1024 });
   markInit('lighting');
 
-  // 3. Build Manhattan Geography, Iconic Landmarks, Blocks, Street Details & Traffic
-  await showLoadingStage('Building streets, parks and waterfronts...');
-  const cityGrid = buildCityGrid(scene);
+  // 3. The starting view: water, roads, sidewalks, landmarks and the buildings around the player. Everything else
+  //    continues behind the game (buildRestOfWorld below) so the player can move as soon as possible.
+  await showLoadingStage('Building streets and sidewalks...');
+  await fontsReady;
+  const lightPools = createLightPools(scene);
+  const gridStage = new THREE.Group();
+  const cityGridJob = buildCityGrid(scene, gridStage);
+  runUntilReady(cityGridJob);
   markInit('cityGrid');
-  await showLoadingStage('Building bridges and surrounding boroughs...');
-  const boroughs = buildBoroughs(scene, { sidewalks: cityGrid.sidewalks });
-  markInit('boroughs');
-  await showLoadingStage('Building landmarks...');
-  const { colliders: landmarkColliders } = buildLandmarks(scene);
+  const landmarkStage = new THREE.Group();
+  const { colliders: landmarkColliders } = buildLandmarks(landmarkStage);
   markInit('landmarks');
-  await showLoadingStage('Generating building footprints and facades...');
-  const cityBlocks = buildCityBlocks(scene, landmarkColliders);
-  markInit('blocks');
-  const allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...boroughs.colliders, ...(cityGrid.colliders || [])];
-
-  await showLoadingStage('Placing trees, streetlights and street furniture...');
-  const streetDetails = buildStreetDetails(scene, allColliders);
-  markInit('streetDetails');
-  await showLoadingStage('Creating traffic and pedestrian routes...');
-  // Buildings turned along non-grid streets have oriented colliders whose world bounds reach past their lots: they stay
-  // inside the property line anyway, so the road network (lanes & sidewalks) doesn't need them.
-  // Elevated building sections that clear even a bus don't obstruct ground traffic.
-  const trafficSystem = createTrafficSystem(scene, cityGrid.sidewalks, [
-    ...cityGrid.footprints,
-    ...streetDetails.footprints,
-    ...allColliders.filter((c) => !c.obb && (c.minY ?? 0) < 3.5)
-  ], streetDetails.signalIntersections);
-  markInit('traffic');
-  const highwayTraffic = createHighwayTraffic(scene, cityGrid.highwayLanes);
-  await showLoadingStage('Adding road markings...');
-  buildRoadPaint(scene, trafficSystem.network, cityGrid.roadPaint);
-  markInit('roadPaint');
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
   await showLoadingStage('Preparing player, vehicles and controls...');
-  const controllerManager = new ThirdPersonControllerManager(scene, allColliders);
+  const controllerManager = new ThirdPersonControllerManager(scene, []);
+  controllerManager.addColliders(landmarkColliders);
   // Reuse teleport placement so saved players return at rest, close to their last positions.
   try {
     const saved = JSON.parse(localStorage.getItem('nyc-player-state'));
@@ -130,6 +129,21 @@ async function initApp() {
       controllerManager.setMode(Object.hasOwn(controllerManager.entities, saved.activeMode) ? saved.activeMode : 'car');
     }
   } catch { /* Missing or unavailable storage does not prevent playing. */ }
+  markInit('controllers');
+
+  await showLoadingStage('Raising the nearest buildings...');
+  const blocksStage = new THREE.Group();
+  const cityBlocksJob = buildCityBlocks(scene, blocksStage, landmarkColliders, controllerManager.getActiveEntity().position);
+  const cityBlocks = runUntilReady(cityBlocksJob);
+  let collidersAdded = cityBlocks.colliders.length;
+  controllerManager.addColliders(cityBlocks.colliders);
+  markInit('blocks');
+
+  // These arrive with the rest of the city, see buildRestOfWorld()
+  let boroughs = null;
+  let streetDetails = null;
+  let trafficSystem = null;
+  let highwayTraffic = null;
 
   function savePlayerState() {
     try {
@@ -143,9 +157,7 @@ async function initApp() {
   const cameraSystem = new CameraSystem(renderer.domElement, controllerManager);
   const touchControls = new TouchControls(controllerManager);
   const soundButton = document.getElementById('btn-sound');
-  const audioSystem = new CityAudioSystem({ controllerManager, trafficSystem, highwayTraffic, streetDetails }, {
-    onStateChange: updateSoundButton
-  });
+  const audioSystem = new CityAudioSystem({ controllerManager }, { onStateChange: updateSoundButton });
   function updateSoundButton() {
     if (!soundButton) return;
     soundButton.disabled = !audioSystem.supported;
@@ -162,40 +174,31 @@ async function initApp() {
     if (!event.persisted) audioSystem.dispose();
   });
   document.addEventListener('visibilitychange', () => { if (document.hidden) savePlayerState(); });
-  markInit('controllers');
 
-  // Island-wide static geometry: chunk & distance-cull the small props, shadow stand-ins for the big casters
-  // (scene-culling.js)
-  await showLoadingStage('Preparing scene visibility and shadows...');
-  const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityBlocks', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs', 'RoadMarkings']
-    .map((name) => scene.getObjectByName(name))
-    .filter(Boolean);
-  setupSceneCulling(scene, cullingRoots, lightingSystem.sunLight.shadow);
-
-  // Initialize static world matrices once, including the chunks and shadow proxies created above.
+  // Everything that moves or animates: only these get new world matrices per frame.
   // Crowd, tree and building-detail animation changes instance/pose buffers, not Object3D transforms.
   const dynamicRoots = [
-    trafficSystem.group,
-    highwayTraffic.group,
+    lightPools.traffic,
     scene.getObjectByName('StoreClusteredLights'),
-    scene.getObjectByName('StreetClusteredLights'),
+    lightPools.street,
     ...Object.values(controllerManager.entities).map((entity) => entity.mesh),
     controllerManager.entities.cyclist.helmet
   ];
   scene.updateMatrixWorld(true);
   scene.matrixWorldAutoUpdate = false;
-  markInit('culling');
 
   // On WebGPU, small InstancedMeshes (<= 1000 instances) keep their matrices in uniform buffers that three.js
   // re-uploads on every draw of every pass (~2.5 MB/frame with the shadow cascades, stalling the GPU queue).
   // Storage attributes only upload when needed; WebGL2 needs ordinary instanced attributes for correct transforms.
-  if (renderer.backend.isWebGPUBackend) {
-    scene.traverse((object) => {
-      if (object.isInstancedMesh) {
+  function useStorageInstancing(root) {
+    if (!renderer.backend.isWebGPUBackend) return;
+    root.traverse((object) => {
+      if (object.isInstancedMesh && !object.instanceMatrix.isStorageInstancedBufferAttribute) {
         object.instanceMatrix = new THREE.StorageInstancedBufferAttribute(object.instanceMatrix.array, 16);
       }
     });
   }
+  useStorageInstancing(scene);
 
   // 5. TSL RenderPipeline with Half-Res Screen Space Reflections (SSRNode), Bloom & Filmic Toning
   //    Fade out distant and matte surfaces so SSR spends its rays on visible glossy reflections.
@@ -205,41 +208,50 @@ async function initApp() {
   // them spares the GPU writing 3 x 4 samples per pixel to memory every frame (transient, memoryless attachments where
   // the browser supports them). The multisampled depth stays stored: SSR reads it.
   scenePass.renderTarget.storeMultisampledColorBuffer = false;
-  const ssrFade = smoothstep(360.0, 180.0, positionView.z.negate());
-  const maxSSRRoughness = 0.75;
-  const sceneMRT = mrt({
-    output: output,
-    normal: normalView,
-    metalRough: vec2(roughness.lessThan(maxSSRRoughness).select(metalness.mul(ssrFade), 0), roughness)
-  });
-  sceneMRT.setBlendMode('normal', new THREE.BlendMode(THREE.MaterialBlending));
-  sceneMRT.setBlendMode('metalRough', new THREE.BlendMode(THREE.MaterialBlending));
-  scenePass.setMRT(sceneMRT);
+  let sceneMRT;
+  let reflections;
+  if (quality.ssr) {
+    const ssrFade = smoothstep(360.0, 180.0, positionView.z.negate());
+    const maxSSRRoughness = 0.75;
+    sceneMRT = mrt({
+      output: output,
+      normal: normalView,
+      metalRough: vec2(roughness.lessThan(maxSSRRoughness).select(metalness.mul(ssrFade), 0), roughness)
+    });
+    sceneMRT.setBlendMode('normal', new THREE.BlendMode(THREE.MaterialBlending));
+    sceneMRT.setBlendMode('metalRough', new THREE.BlendMode(THREE.MaterialBlending));
+    scenePass.setMRT(sceneMRT);
 
-  const scenePassColor = scenePass.getTextureNode('output');
-  const scenePassDepth = scenePass.getTextureNode('depth');
-  const scenePassNormal = scenePass.getTextureNode('normal');
-  const scenePassMetalRough = scenePass.getTextureNode('metalRough');
+    const scenePassColor = scenePass.getTextureNode('output');
+    const scenePassDepth = scenePass.getTextureNode('depth');
+    const scenePassNormal = scenePass.getTextureNode('normal');
+    const scenePassMetalRough = scenePass.getTextureNode('metalRough');
 
-  const ssrPass = ssr(scenePassColor, scenePassDepth, scenePassNormal, {
-    metalnessNode: scenePassMetalRough.r,
-    roughnessNode: scenePassMetalRough.g,
-    camera: cameraSystem.camera
-  });
-  ssrPass.resolutionScale = 0.5;
-  ssrPass.blurQuality = 1;
-  ssrPass.maxDistance.value = 42;
-  ssrPass.thickness.value = 0.85;
-  // Fewer coarse steps, then refine detected hits to keep reflection edges precise.
-  ssrPass.quality.value = 0.25;
-  ssrPass.binaryRefine = true;
-  ssrPass.intensity.value = 0.50;
-  ssrPass.screenEdgeFadeBlack = true;
+    const ssrPass = ssr(scenePassColor, scenePassDepth, scenePassNormal, {
+      metalnessNode: scenePassMetalRough.r,
+      roughnessNode: scenePassMetalRough.g,
+      camera: cameraSystem.camera
+    });
+    ssrPass.resolutionScale = 0.5;
+    ssrPass.blurQuality = 1;
+    ssrPass.maxDistance.value = 42;
+    ssrPass.thickness.value = 0.85;
+    // Fewer coarse steps, then refine detected hits to keep reflection edges precise.
+    ssrPass.quality.value = 0.25;
+    ssrPass.binaryRefine = true;
+    ssrPass.intensity.value = 0.50;
+    ssrPass.screenEdgeFadeBlack = true;
 
-  // Roughness mip blur must not spread reflections back onto matte or nonreflective surfaces.
-  const reflectionMask = scenePassMetalRough.r.greaterThan(0).select(smoothstep(maxSSRRoughness, 0.55, scenePassMetalRough.g), 0);
-  const reflections = ssrPass.mul(reflectionMask);
-  const colorGrade = createPostProcessing(renderer, scenePassColor, reflections);
+    // Roughness mip blur must not spread reflections back onto matte or nonreflective surfaces.
+    const reflectionMask = scenePassMetalRough.r.greaterThan(0).select(smoothstep(maxSSRRoughness, 0.55, scenePassMetalRough.g), 0);
+    reflections = ssrPass.mul(reflectionMask);
+  } else {
+    // Stays an MRT with one target: without any, the scene's WGSL gets empty output structures and fails to compile.
+    sceneMRT = mrt({ output: output });
+    scenePass.setMRT(sceneMRT);
+    reflections = vec3(0);
+  }
+  const colorGrade = createPostProcessing(renderer, scenePass.getTextureNode('output'), reflections, quality);
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
@@ -265,9 +277,59 @@ async function initApp() {
       selectMode(modes[(modes.indexOf(controllerManager.activeMode) + step + modes.length) % modes.length]);
     },
     onCycleCamera: cycleCamera,
-    onToggleMap: () => mapSystem.toggleFullMap(!mapSystem.isFullMapOpen),
-    onCloseMap: () => mapSystem.toggleFullMap(false)
+    onToggleMap: () => {
+      if (!pauseMenu.isOpen) mapSystem.toggleFullMap(!mapSystem.isFullMapOpen);
+    },
+    onCloseMap: () => mapSystem.toggleFullMap(false),
+    onTogglePause: () => pauseMenu.toggle()
   });
+
+  const pauseMenu = new PauseMenu({
+    onOpen() {
+      closePopovers();
+      controllerManager.resetInput();
+      touchControls.setEnabled(false);
+      gamepadControls.setEnabled(false);
+      audioSystem.setPaused(true);
+    },
+    onClose() {
+      touchControls.setEnabled(!mapSystem.isFullMapOpen);
+      gamepadControls.setEnabled(!mapSystem.isFullMapOpen);
+      audioSystem.setPaused(false);
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && interactive) pauseMenu.open();
+  });
+  document.getElementById('btn-pause')?.addEventListener('click', () => pauseMenu.open());
+
+  // Graphics levels decide what gets built and compiled, so a change reloads. Player state saves on the way out.
+  for (const button of document.querySelectorAll('[data-quality]')) {
+    const choice = button.getAttribute('data-quality');
+    button.setAttribute('aria-pressed', String(choice === quality.choice));
+    if (choice === 'auto') button.textContent = `Auto (${quality.level})`;
+    button.addEventListener('click', () => {
+      if (choice === quality.choice) return;
+      saveChoice(CHOICES.includes(choice) ? choice : 'auto');
+      location.reload();
+    });
+  }
+
+  if (fullscreenSupported) {
+    const buttons = [document.getElementById('btn-fullscreen'), document.getElementById('pause-fullscreen')].filter(Boolean);
+    for (const button of buttons) {
+      button.hidden = false;
+      button.addEventListener('click', () => toggleFullscreen()?.catch(() => {}));
+    }
+    onFullscreenChange(() => {
+      const active = Boolean(fullscreenElement());
+      for (const button of buttons) {
+        button.setAttribute('aria-pressed', String(active));
+        if (button.id === 'pause-fullscreen') button.textContent = active ? 'Exit full screen' : 'Full screen';
+        else button.setAttribute('aria-label', active ? 'Exit full screen' : 'Enter full screen');
+      }
+    });
+  }
 
   // Keyboard guide for each mode: [keys, action]
   const controlHints = {
@@ -463,6 +525,19 @@ async function initApp() {
     elLocation.replaceChildren(...nodes);
   }
 
+  // Registered before the map's own key handler, so the Esc that closes the map doesn't also pause the game.
+  // A native popover closes on Esc by itself; the pause dialog does too, through its cancel event.
+  window.addEventListener('keydown', (e) => {
+    if (!interactive || e.repeat || isTypingInField(e)) return;
+    if (e.code === 'KeyP') {
+      pauseMenu.toggle();
+    } else if (e.code === 'Escape' && !pauseMenu.isOpen && !mapSystem.isFullMapOpen) {
+      if (supportsPopover && document.querySelector('.popover:popover-open')) return;
+      e.preventDefault(); // the dialog opens during this very key press, which must not count as closing it too
+      pauseMenu.open();
+    }
+  });
+
   function teleportTo(x, z, heading = Math.PI) {
     const destination = controllerManager.teleportActiveTo(x, z, heading);
     touchControls.reset();
@@ -480,8 +555,8 @@ async function initApp() {
   const mapSystem = new NYCMapSystem({
     controllerManager,
     cameraSystem,
-    trafficSystem,
-    allBlocks: cityBlocks.allBlocks,
+    // A copy, because the map redraws its footprint layers whenever this list grows. It gets the full city in one go.
+    allBlocks: cityBlocks.allBlocks.slice(),
     onToggle: (open) => {
       controllerManager.resetInput();
       touchControls.setEnabled(!open);
@@ -491,7 +566,8 @@ async function initApp() {
         mapHint.textContent = 'Tap to teleport · Drag to pan · Use + / − to zoom';
       }
     },
-    onTeleport: teleportTo
+    onTeleport: teleportTo,
+    isPaused: () => pauseMenu.isOpen
   });
 
   teleportButtons.forEach((btn) => {
@@ -521,7 +597,7 @@ async function initApp() {
 
   // Global keyboard shortcuts for modes (1-4), cameras (V / 5-0), and HUD (H)
   window.addEventListener('keydown', (e) => {
-    if (isTypingInField(e)) return;
+    if (isTypingInField(e) || pauseMenu.isOpen) return;
     switch (e.code) {
       case 'Digit1':
         selectMode('person');
@@ -568,15 +644,28 @@ async function initApp() {
     }
   });
 
-  window.addEventListener('resize', () => {
-    cameraSystem.onResize(window.innerWidth, window.innerHeight);
-    renderer.setSize(window.innerWidth, window.innerHeight);
+  // Window resizes, rotation and mobile browser bars all land here. The new size is applied at the start of the next
+  // frame, so the canvas never gets cleared without a fresh image to replace it.
+  const viewport = { width: container.clientWidth, height: container.clientHeight };
+  let resizePending = false;
+  const onViewportChange = () => {
+    resizePending = container.clientWidth !== viewport.width || container.clientHeight !== viewport.height;
+  };
+  new ResizeObserver(onViewportChange).observe(container);
+  window.visualViewport?.addEventListener('resize', onViewportChange);
+
+  function applyViewportSize() {
+    resizePending = false;
+    viewport.width = container.clientWidth;
+    viewport.height = container.clientHeight;
+    cameraSystem.onResize(viewport.width, viewport.height);
+    renderer.setSize(viewport.width, viewport.height);
     placeModeIndicator();
     if (mapSystem.isFullMapOpen) {
       mapSystem.resizeFullCanvas();
       mapSystem.renderFullMap();
     }
-  });
+  }
 
   // Initialize the UI and chase camera around the restored player, or the default taxi on a first visit.
   selectMode(controllerManager.activeMode);
@@ -586,12 +675,81 @@ async function initApp() {
   if (document.fonts) document.fonts.ready.then(placeModeIndicator);
   markInit('ui');
 
-  // Compile shaders behind the loading screen. Overlapping compileAsync() jobs keep compilation moving
-  // while individual jobs yield to the browser.
+  // Compile what the starting view shows behind the loading screen, then the rest a job at a time once the player can
+  // move. Overlapping compileAsync() jobs keep compilation moving while individual jobs yield to the browser.
   const COMPILE_POOL = 16;
   const nextTask = () => (globalThis.scheduler?.yield ? globalThis.scheduler.yield() : new Promise((resolve) => setTimeout(resolve, 0)));
+  let laterCompileJobs = [];
+
+  // Plain meshes that share a material share its shader, so one job compiles them in turn (the first build serves the
+  // rest); every instanced mesh gets a build of its own unless its chunks share a pipeline
+  function collectCompileJobs(root) {
+    const camera = cameraSystem.camera;
+    camera.updateMatrixWorld();
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+    );
+    // A stage that isn't in the scene yet compiles whole, without working out each object's bounds
+    const allInView = root !== scene;
+    const pipelines = new Map();
+    root.traverseVisible((o) => {
+      if (!o.isMesh && !o.isLine && !o.isPoints && !o.isSprite) return;
+      // Shadow stand-ins only draw in the shadow maps, which compile with the frame that needs them
+      if (o.userData.shadowProxy) return;
+      const key = o.userData.sharesPipelineWith || o;
+      let entry = pipelines.get(key);
+      if (!entry) pipelines.set(key, (entry = { object: o, inView: false }));
+      if (!entry.inView && (allInView || !o.frustumCulled || frustum.intersectsObject(o))) entry.inView = true;
+    });
+    const groups = { now: { jobs: [], byMaterial: new Map() }, later: { jobs: [], byMaterial: new Map() } };
+    for (const { object, inView } of pipelines.values()) {
+      const { jobs, byMaterial } = inView ? groups.now : groups.later;
+      if (object.isInstancedMesh || Array.isArray(object.material)) {
+        jobs.push([object]);
+        continue;
+      }
+      let job = byMaterial.get(object.material);
+      if (!job) {
+        job = [];
+        byMaterial.set(object.material, job);
+        jobs.push(job);
+      }
+      job.push(object);
+    }
+    return { now: groups.now.jobs, later: groups.later.jobs };
+  }
+
+  // compileAsync() works across many tasks and reads the render target at each step, so its target stays set between
+  // frames. Those pipelines must be the very ones the scene pass asks for. renderFrame() steps aside for the frame.
+  let compileTargetInUse = false;
+  function setCompileTarget(inUse) {
+    compileTargetInUse = inUse;
+    renderer.setRenderTarget(inUse ? scenePass.renderTarget : null);
+    renderer.setMRT(inUse ? sceneMRT : null);
+  }
+
+  function renderFrame() {
+    if (compileTargetInUse) {
+      renderer.setRenderTarget(null);
+      renderer.setMRT(null);
+    }
+    renderPipeline.render();
+    if (compileTargetInUse) setCompileTarget(true);
+  }
+
+  // compileAsync() culls during its synchronous start, and most of these objects are out of view by design
+  function compileObject(object) {
+    const { frustumCulled, visible } = object;
+    object.frustumCulled = false;
+    object.visible = true;
+    const compiled = renderer.compileAsync(object, cameraSystem.camera, scene);
+    object.frustumCulled = frustumCulled;
+    object.visible = visible;
+    return compiled.catch((e) => console.warn('[compile]', e)); // the frame that needs it compiles it instead
+  }
+
   async function precompileShaders() {
-    await showLoadingStage('Preparing reflections and bloom...');
+    await showLoadingStage('Preparing the view...');
     // An empty frame first: it sets up the post-processing chain, which configures the scene pass's render target
     // (MSAA samples, depth format), so the pipelines compiled below are the very ones the scene pass asks for
     scene.visible = false;
@@ -599,74 +757,131 @@ async function initApp() {
     scene.visible = true;
     markInit('postFX');
 
-    // Every visible object with frustum culling off (like the warm-up frame, see the loop). Plain meshes that share
-    // a material share its shader, so one job compiles them in turn (the first build serves the rest); every
-    // instanced mesh gets a build of its own unless its chunks share a pipeline
-    const culled = [];
-    const jobs = [];
-    const jobByMaterial = new Map();
-    const pipelines = new Set();
-    scene.traverseVisible((o) => {
-      if (o.frustumCulled) {
-        culled.push(o);
-        o.frustumCulled = false;
-      }
-      if (!o.isMesh && !o.isLine && !o.isPoints && !o.isSprite) return;
-      // Use the first visible chunk: the original representative may be in an inactive tree cell. Shadow stand-ins
-      // only draw in the shadow maps (the warm-up frame compiles those).
-      if (o.userData.shadowProxy) return;
-      const pipeline = o.userData.sharesPipelineWith || o;
-      if (pipelines.has(pipeline)) return;
-      pipelines.add(pipeline);
-      if (o.isInstancedMesh || Array.isArray(o.material)) {
-        jobs.push([o]);
-        return;
-      }
-      let job = jobByMaterial.get(o.material);
-      if (!job) {
-        job = [];
-        jobByMaterial.set(o.material, job);
-        jobs.push(job);
-      }
-      job.push(o);
-    });
+    cameraSystem.update(0, 0);
+    const { now, later } = collectCompileJobs(scene);
+    laterCompileJobs = later;
 
-    await showLoadingStage(`Compiling scene shaders... 0 / ${jobs.length} batches`);
+    await showLoadingStage(`Compiling scene shaders... 0 / ${now.length} batches`);
     setLoadingProgress(0);
-    renderer.setRenderTarget(scenePass.renderTarget);
-    renderer.setMRT(sceneMRT);
-    const compile = async (object) => {
-      // Each compile starts in a task of its own: compileAsync() keeps one precompilation state on the renderer,
-      // which must not be mid-step for two of them in the same microtask checkpoint
-      await nextTask();
-      try {
-        await renderer.compileAsync(object, cameraSystem.camera, scene);
-      } catch (e) {
-        console.warn('[compile]', e); // the warm-up frame compiles it instead
-      }
-    };
+    setCompileTarget(true);
     let next = 0;
     let done = 0;
     const worker = async () => {
-      while (next < jobs.length) {
-        const job = jobs[next++];
-        for (const object of job) await compile(object);
+      while (next < now.length) {
+        const job = now[next++];
+        // Each compile starts in a task of its own: compileAsync() keeps one precompilation state on the renderer,
+        // which must not be mid-step for two of them in the same microtask checkpoint
+        for (const object of job) {
+          await nextTask();
+          await compileObject(object);
+        }
         done++;
         if (loadingStatus) {
-          loadingStatus.textContent = `Compiling scene shaders... ${done} / ${jobs.length} batches (${Math.round((done / jobs.length) * 100)}%)`;
+          loadingStatus.textContent = `Compiling scene shaders... ${done} / ${now.length} batches (${Math.round((done / now.length) * 100)}%)`;
         }
-        setLoadingProgress(done / jobs.length);
+        setLoadingProgress(done / now.length);
       }
     };
     await Promise.all(Array.from({ length: COMPILE_POOL }, worker));
-    renderer.setMRT(null);
-    renderer.setRenderTarget(null);
-    for (const o of culled) o.frustumCulled = true;
+    setCompileTarget(false);
   }
 
   await precompileShaders();
   markInit('compile');
   await showLoadingStage('Preparing shadows and the first frame...');
+
+  // Runs between frames once the game is interactive, a few objects per frame, so that a shader nobody has reached yet
+  // doesn't stall the moment the player turns towards it.
+  async function compileJobs(jobs) {
+    setCompileTarget(true);
+    let sliceStart = performance.now();
+    for (const job of jobs) {
+      for (const object of job) {
+        await compileObject(object);
+        if (performance.now() - sliceStart > 3) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          sliceStart = performance.now();
+        }
+      }
+    }
+    setCompileTarget(false);
+  }
+
+  // A stage of the city is built off to the side and joins the scene with its shaders ready, so it appears at once
+  async function revealStage(stage) {
+    stage.updateMatrixWorld(true);
+    useStorageInstancing(stage);
+    const { now, later } = collectCompileJobs(stage);
+    await compileJobs([...now, ...later]);
+    scene.add(stage);
+  }
+
+  function* buildRestOfWorld() {
+    yield compileJobs(laterCompileJobs);
+    laterCompileJobs = [];
+    yield revealStage(cityBlocks.group);
+    yield revealStage(landmarkStage);
+
+    // Code the first view doesn't need stays out of the first download
+    let city;
+    yield Promise.all([import('./boroughs.js'), import('./street-details.js'), import('./traffic.js'), import('./road-paint.js')])
+      .then((modules) => { city = Object.assign({}, ...modules); });
+    const { buildBoroughs, buildStreetDetails, createTrafficSystem, createHighwayTraffic, buildRoadPaint } = city;
+
+    const cityGrid = yield* cityGridJob;
+    yield revealStage(gridStage);
+    controllerManager.addColliders(cityGrid.colliders || []);
+
+    yield* cityBlocksJob;
+    controllerManager.addColliders(cityBlocks.colliders.slice(collidersAdded));
+    collidersAdded = cityBlocks.colliders.length;
+    yield revealStage(blocksStage);
+    cityBlocks.update(cameraSystem.currentPos.x, cameraSystem.currentPos.z, true);
+    yield* mapSystem.prepareBlocks(cityBlocks.allBlocks);
+
+    const boroughStage = new THREE.Group();
+    boroughs = yield* buildBoroughs(boroughStage, { sidewalks: cityGrid.sidewalks });
+    controllerManager.addColliders(boroughs.colliders);
+    yield revealStage(boroughStage);
+
+    const detailStage = new THREE.Group();
+    const allColliders = controllerManager.colliders;
+    const details = yield* buildStreetDetails(detailStage, allColliders, lightPools);
+    yield revealStage(detailStage);
+    streetDetails = details;
+
+    // Buildings turned along non-grid streets have oriented colliders whose world bounds reach past their lots: they
+    // stay inside the property line anyway, so the road network (lanes & sidewalks) doesn't need them.
+    // Elevated building sections that clear even a bus don't obstruct ground traffic.
+    const trafficStage = new THREE.Group();
+    const traffic = yield* createTrafficSystem(trafficStage, cityGrid.sidewalks, [
+      ...cityGrid.footprints,
+      ...streetDetails.footprints,
+      ...allColliders.filter((c) => !c.obb && (c.minY ?? 0) < 3.5)
+    ], streetDetails.signalIntersections, { numCars: quality.cars, numBuses: quality.buses, numPeds: quality.pedestrians, lightPools });
+    yield;
+    const highway = createHighwayTraffic(trafficStage, cityGrid.highwayLanes);
+    yield;
+    buildRoadPaint(trafficStage, traffic.network, cityGrid.roadPaint);
+    yield;
+    yield* traffic.populate(cameraSystem.currentPos);
+    yield revealStage(trafficStage);
+    trafficSystem = traffic;
+    highwayTraffic = highway;
+    mapSystem.trafficSystem = traffic;
+    audioSystem.attachCity({ trafficSystem, highwayTraffic, streetDetails });
+    dynamicRoots.push(trafficSystem.group, highwayTraffic.group);
+
+    // Island-wide static geometry: chunk & distance-cull the small props, shadow stand-ins for the big casters
+    // (scene-culling.js)
+    const cullingRoots = ['ManhattanCityGrid', 'ManhattanCityGridDetails', 'ManhattanCityBlocksNear', 'ManhattanCityBlocks', 'ManhattanCityBlocksFar', 'ManhattanStreetDetails', 'ManhattanLandmarks', 'Boroughs', 'RoadMarkings']
+      .map((name) => scene.getObjectByName(name))
+      .filter(Boolean);
+    yield* setupSceneCullingSteps(scene, cullingRoots, lightingSystem.sunLight.shadow, renderer.backend.isWebGPUBackend);
+    setDrawDistance(quality.drawDistance);
+    worldCompleteAt = performance.now();
+    console.log(`[world] complete at ${Math.round(worldCompleteAt)} ms`);
+  }
 
   // 6. Animation Loop
   let lastTime = performance.now();
@@ -674,22 +889,91 @@ async function initApp() {
   let frameCount = 0;
   let fpsTimer = 0;
   let nextPlayerSave = 0;
-  let warmedUp = false; // see the first frame below
+  let firstFrameDone = false;
+  const MAX_FRAMES_IN_FLIGHT = 2;
+  let framesInFlight = 0;
 
   if (elFps) elFps.textContent = '60';
 
+  // Read-only view for tools/play, which steers through real input events and only uses this to check the result.
+  const debugFrames = new URLSearchParams(location.search).get('debug') === '1'
+    ? { simMs: 0, submitMs: 0, count: 0, gaps: [], lastStart: performance.now() }
+    : null;
+  if (debugFrames) {
+    window.__slopDebug = Object.freeze({
+      avenueX,
+      streetZ,
+      places: TELEPORT_LOCATIONS,
+      load: () => ({ stages: Object.fromEntries(initTimings), interactiveAt: interactiveAt ?? null }),
+      clock: () => elapsed,
+      paused: () => pauseMenu.isOpen,
+      worldCompleteAt: () => worldCompleteAt,
+      quality: () => ({ choice: quality.choice, level: quality.level, pixelRatio: renderer.getPixelRatio() }),
+      audioState: () => audioSystem.context?.state ?? 'none',
+      input: () => ({ ...controllerManager.keys }),
+      player() {
+        const entity = controllerManager.getActiveEntity();
+        const { x, y, z } = entity.position;
+        const mode = controllerManager.activeMode;
+        return {
+          mode, x, y, z, heading: entity.heading, speed: entity.speed,
+          ground: controllerManager.getGroundHeight(x, z, mode),
+          roof: controllerManager.roofHeightAt(x, z, y)
+        };
+      },
+      camera: () => ({ aspect: cameraSystem.camera.aspect, fov: cameraSystem.camera.fov }),
+      // Averages since the previous read, so a script can measure one stretch of play
+      frameCost() {
+        const { simMs, submitMs, count, gaps } = debugFrames;
+        Object.assign(debugFrames, { simMs: 0, submitMs: 0, count: 0, gaps: [] });
+        gaps.sort((a, b) => a - b);
+        const at = (q) => Number((gaps[Math.floor(gaps.length * q)] ?? 0).toFixed(1));
+        const seconds = gaps.reduce((sum, gap) => sum + gap, 0) / 1000;
+        return {
+          simMs: simMs / (count || 1), submitMs: submitMs / (count || 1), frames: count,
+          fps: Number((count / (seconds || 1)).toFixed(1)), p50: at(0.5), p95: at(0.95), p99: at(0.99)
+        };
+      },
+      renderInfo() {
+        const { render } = renderer.info;
+        return { backend: renderer.backend.isWebGPUBackend ? 'webgpu' : 'webgl2', drawCalls: render.drawCalls, triangles: render.triangles };
+      }
+    });
+  }
+
+  const frameWatcher = new FrameWatcher(quality, {
+    storage: localStorage,
+    onPixelScale: (scale) => renderer.setPixelRatio(quality.pixelRatio / quality.pixelScale * scale)
+  });
+
   renderer.setAnimationLoop((now) => {
+    const resized = resizePending;
+    if (resized) applyViewportSize();
+    if (pauseMenu.isOpen) {
+      lastTime = now;
+      gamepadControls.update(0); // its pause button has to keep working
+      if (resized) renderFrame();
+      return;
+    }
+
+    // Submitting faster than the GPU finishes fills the queue until the browser stalls the page for several frames at
+    // once, a 17, 17, 100 ms rhythm that feels worse than an even pace at the same average. Skip until it has caught up.
+    // Two frames stay in flight: the completion signal arrives late, so waiting for every frame halves the frame rate.
+    if (framesInFlight >= MAX_FRAMES_IN_FLIGHT) return;
+
+    const frameStart = debugFrames && performance.now();
     const rawDt = (now - lastTime) * 0.001;
     lastTime = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
+    if (worldCompleteAt !== null) frameWatcher.update(rawDt); // building the city slows frames on purpose
     elapsed += dt;
 
     // Update 3rd-person controllers, camera, signals, traffic & vehicle collisions, building LODs, and dynamic shadow focus
     gamepadControls.update(dt);
     controllerManager.update(dt, elapsed, cameraSystem.initialized ? cameraSystem.currentPos : null);
     cameraSystem.update(dt, elapsed);
-    streetDetails.signalClock.value = elapsed;
-    trafficSystem.update(
+    if (streetDetails) streetDetails.signalClock.value = elapsed;
+    trafficSystem?.update(
       dt,
       elapsed,
       cameraSystem.currentPos,
@@ -697,57 +981,54 @@ async function initApp() {
       controllerManager.activeMode,
       cameraSystem.camera
     );
-    highwayTraffic.update(dt, cameraSystem.camera, controllerManager.getActiveEntity(), controllerManager.activeMode);
+    highwayTraffic?.update(dt, cameraSystem.camera, controllerManager.getActiveEntity(), controllerManager.activeMode);
     if (!document.hidden && now >= nextPlayerSave) {
       savePlayerState();
       nextPlayerSave = now + 5000;
     }
-    if (boroughs.update) boroughs.update(elapsed); // Roosevelt Island Tramway cabins
+    boroughs?.update?.(elapsed); // Roosevelt Island Tramway cabins
     cityBlocks.update(cameraSystem.currentPos.x, cameraSystem.currentPos.z);
     if (cityBlocks.updateLights) cityBlocks.updateLights(cameraSystem.camera);
-    if (streetDetails.update) streetDetails.update(cameraSystem.camera);
+    streetDetails?.update?.(cameraSystem.camera);
     lightingSystem.update(cameraSystem.currentPos);
     mapSystem.update();
     audioSystem.update(dt, elapsed, cameraSystem.camera, lightingSystem.activePresetId === 'midnight');
-    if (warmedUp) updateSceneCulling(cameraSystem.camera.position); // the warm-up frame draws every chunk
+    updateSceneCulling(cameraSystem.camera.position);
     // Traffic collisions can move the player after controller updates; finalize moving hierarchies here.
     for (const root of dynamicRoots) root.updateMatrixWorld();
 
+    const simEnd = debugFrames && performance.now();
+
     // Render frame via TSL RenderPipeline (SSR + Bloom)
-    if (!warmedUp) {
-      // First frame = pipeline warm-up behind the loading screen, for what precompileShaders() can't reach (the shadow
-      // map passes): with frustum culling off, every visible material's pipelines compile now instead of stalling the
-      // first time the camera turns towards it (one chunk / shadow stand-in per shared pipeline is enough)
-      const culled = [];
-      const pipelines = new Set();
-      scene.traverseVisible((o) => {
-        const pipeline = o.userData.sharesPipelineWith || o;
-        if (pipelines.has(pipeline)) return;
-        pipelines.add(pipeline);
-        if (o.frustumCulled) {
-          culled.push(o);
-          o.frustumCulled = false;
-        }
-      });
-      renderPipeline.render();
-      for (const o of culled) o.frustumCulled = true;
-      markInit('warmup');
+    renderFrame();
+    if (firstFrameDone && renderer.backend.device) {
+      framesInFlight++;
+      renderer.backend.device.queue.onSubmittedWorkDone().catch(() => {}).then(() => { framesInFlight--; });
     }
-    renderPipeline.render();
-    if (!warmedUp) {
-      warmedUp = true;
+    // The rest of the city gets what this frame left of a 30 FPS budget
+    worldBuilder?.step(Math.max(4, Math.min(20, 33 - (performance.now() - frameStart))));
+    if (debugFrames) {
+      debugFrames.simMs += simEnd - frameStart;
+      debugFrames.submitMs += performance.now() - simEnd;
+      debugFrames.count++;
+      debugFrames.gaps.push(frameStart - debugFrames.lastStart);
+      debugFrames.lastStart = frameStart;
+    }
+    if (!firstFrameDone) {
+      firstFrameDone = true;
       markInit('firstFrame');
-      // The loading screen stays up until the GPU has got through the first frame (and the pipelines its warm-up
-      // compiled), i.e. until the city is actually on screen
+      // The loading screen stays up until the GPU has got through the first frame, i.e. until the city is on screen
       const device = renderer.backend.device;
       if (loadingStatus) loadingStatus.textContent = 'Waiting for graphics to finish the first frame...';
       Promise.resolve(device && device.queue.onSubmittedWorkDone()).catch(() => {}).then(() => {
         markInit('gpu');
-        console.log(`[init] ${initTimings.join(', ')}`);
-        initTimings = null;
+        console.log(`[init] ${initTimings.map(([label, ms]) => `${label} ${ms}ms`).join(', ')}`);
+        interactiveAt = performance.now();
+        interactive = true;
         if (loadingOverlay) loadingOverlay.classList.add('hidden');
         audioSystem.ready = true;
         setLoadingProgress(1);
+        worldBuilder = new WorldBuilder(buildRestOfWorld());
       });
     }
 

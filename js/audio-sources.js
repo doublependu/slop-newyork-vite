@@ -82,14 +82,14 @@ class NearestSources {
 // Read at audio's control rate (10 Hz), after simulation updates. Snapshots remain valid until the next collect().
 // IDs are the simulation objects, independent of pooled record order, so voices survive ranking changes/recycling.
 class CityAudioSources {
-  constructor({ controllerManager, trafficSystem, highwayTraffic, streetDetails }) {
+  constructor({ controllerManager }) {
     this.controllers = controllerManager;
     this.players = Object.values(controllerManager.entities);
-    this.cars = trafficSystem.cars;
-    this.buses = trafficSystem.buses;
-    this.peds = trafficSystem.peds;
-    this.highwayCars = highwayTraffic.cars;
-    this.signalSites = streetDetails.audioSignals;
+    this.cars = [];
+    this.buses = [];
+    this.peds = [];
+    this.highwayCars = [];
+    this.signalSites = [];
     this.motors = new NearestSources(10);
     this.sirens = new NearestSources(2);
     this.people = new NearestSources(6);
@@ -98,6 +98,15 @@ class CityAudioSources {
       motors: this.motors.items, sirens: this.sirens.items,
       people: this.people.items, signals: this.signals.items, traffic: 0, motion: 0
     };
+  }
+
+  // Traffic and street furniture arrive after the game is playable
+  attachCity({ trafficSystem, highwayTraffic, streetDetails }) {
+    this.cars = trafficSystem.cars;
+    this.buses = trafficSystem.buses;
+    this.peds = trafficSystem.peds;
+    this.highwayCars = highwayTraffic.cars;
+    this.signalSites = streetDetails.audioSignals;
   }
 
   distanceSq(x, y, z) {

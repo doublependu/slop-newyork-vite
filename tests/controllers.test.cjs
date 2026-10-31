@@ -708,3 +708,32 @@ test('player clearance respects altitude and permits a ground arrival under an a
   helicopter.position.y = 1;
   assert.notDeepEqual({ ...controller.teleportActiveTo(0, 0) }, { x: 0, z: 0 }, 'a helicopter parked at street level must be avoided');
 });
+
+test('a helicopter settles on a roof and flies on from it', () => {
+  const { controller } = keyboardHarness({ ISLAND_BOUNDS: { minX: -1e4, maxX: 1e4, minZ: -1e4, maxZ: 1e4 } });
+  const outer = [{ x: -30, z: -30 }, { x: 30, z: -30 }, { x: 30, z: 30 }, { x: -30, z: 30 }];
+  controller.colliders = [{ minX: -30, maxX: 30, minZ: -30, maxZ: 30, minY: 0, maxY: 40, polygon: { outer, holes: [] } }];
+  const heli = {
+    type: 'helicopter', position: { x: 0, y: 60, z: 0 }, heading: 0, speed: 0, verticalSpeed: -16,
+    pitchAngle: 0, rollAngle: 0, tiltPivot: { rotation: {}, position: {} }
+  };
+  controller.entities = { helicopter: heli };
+  controller.activeMode = 'helicopter';
+  controller.keys.down = true;
+  for (let i = 0; i < 240; i++) controller.updateHelicopter(1 / 60, i / 60);
+
+  assert.equal(heli.position.y, 40.25, 'rests on the roof instead of sinking through it');
+  assert.equal(heli.verticalSpeed, 0, 'descent stops at the roof');
+  assert.deepEqual([heli.position.x, heli.position.z], [0, 0], 'the roof does not throw it sideways');
+
+  controller.keys.down = false;
+  controller.keys.up = true;
+  for (let i = 0; i < 60; i++) controller.updateHelicopter(1 / 60, i / 60);
+  assert.ok(heli.position.y > 41, 'lifts off again');
+
+  controller.keys.up = false;
+  controller.colliders[0].maxY = 400;
+  controller._colliderCells = null;
+  heli.position.y = 120;
+  assert.equal(controller.roofHeightAt(0, 0, heli.position.y), 0, 'a tower still above it is no roof to land on');
+});

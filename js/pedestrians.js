@@ -977,7 +977,7 @@ class PersonCrowd {
       const pose = attributeArray(maxCount * STRIDE, 'vec4').toReadOnly();
       const mesh = new THREE.Mesh(buildPersonGeometry(detail), createPersonMaterial(pose, detail));
       mesh.name = detail ? 'PeopleNear' : 'PeopleFar';
-      mesh.count = 1; // one (degenerate) person until warm-up finishes, so the pipelines compile up front
+      mesh.count = 1; // one (degenerate) person until the crowd is placed, so the pipelines compile up front
       mesh.frustumCulled = false;
       mesh.castShadow = Boolean(castShadow && detail > 0);
       mesh.receiveShadow = true;

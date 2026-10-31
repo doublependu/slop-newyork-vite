@@ -23,7 +23,8 @@ const LANE_CLEAR = 1.2; // half width each lane keeps free of obstacles
 const CROSSWALK = 2.5; // depth between an intersection box and its stop lines
 const SHORE_MARGIN = 6;
 
-function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
+function* buildRoadNetworkSteps(sidewalks, obstacles, signalIntersections = []) {
+  yield;
   // 1. Spatial hash of ground footprints: curbs bound the roads, everything else also blocks pedestrians
   const hash = new Map();
   const cellKey = (ix, iz) => (ix + 512) * 1024 + iz + 512;
@@ -105,6 +106,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
     nearMedian(x, z, clear) ||
     query(x - clear, x + clear, z - clear, z + clear, (r) => !r.curb && !r.pedestrianOnly && (r.maxX - r.minX < 50 || r.maxZ - r.minZ < 50) && !medianBox(r));
 
+  yield;
   // 2. Avenue corridors: the most common curb-to-curb gap around each avenue's nominal x along its own stretches
   //    (CSCL: an avenue only exists between its ends, e.g. Irving Pl 14th-20th St, so it never claims a neighbour's
   //    roadway), and the stretches of z (at least 30 m long) where at least one of its lanes is clear. Each stretch
@@ -196,6 +198,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
   avenues.sort((a, b) => a.x - b.x);
   console.info('[roads] avenues', avenues.map((a) => `${a.name} x=${a.x.toFixed(1)} half=${a.half.toFixed(1)} free=${(a.free.reduce((s, v) => s + v, 0) / 1000).toFixed(1)}km`).join(' | '));
 
+  yield;
   // 3. Cross streets: free z intervals of the line joining two neighbouring active avenue corridors
   const pieces = [];
   const runs = new Map();
@@ -232,6 +235,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
     p.west = twoWay ? pair : st.dir < 0 ? [-1.8, 1.8] : [];
   }
 
+  yield;
   // 4. Intersections: street ends on avenue corridors (merged within 6 m)
   let nodes = [];
   function nodeAt(a, z) {
@@ -248,6 +252,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
     for (const n of [p.from, p.to]) n.hz = Math.max(n.hz, Math.abs(p.z - n.z) + Math.min(p.half, 13));
   }
 
+  yield;
   // 4b. Non-grid streets: Lower Manhattan, Broadway and the curved avenues farther north, from
   //     the street centreline graph (GEO.roadGraph, tools/geo-roadgraph.mjs), minus the links the grid corridors above
   //     already carry. Its junctions join the grid where they meet it (at a grid intersection, on an avenue corridor or a
@@ -430,6 +435,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
     return runs;
   }
 
+  yield;
   // 5. Directed edges between intersections, keeping only the lanes clear of obstacles node to node
   let edges = [];
   function addEdge(from, to, axis, x0, z0, x1, z1, lanes, half) {
@@ -768,6 +774,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
     from: paintNodes.get(from), to: paintNodes.get(to), axis, x0, z0, sx, sz, dx, dz, rx, rz, span, len, half, lanes
   }));
 
+  yield;
   // 6. Movements at each intersection (no U-turns) and the lane each lane leads to, along obstacle-free curves:
   //    straight on, lane i keeps to lane i + k ahead, k chosen to use as many lanes there as possible with the least
   //    sideways shift; turns go from the lane nearest the turn into the lane nearest it. Lanes left with no way on
@@ -981,6 +988,7 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
     for (const e of edges) e.moves = e.moves.filter((m) => !inTheWayOut.has(m.to));
   }
 
+  yield;
   // 7. Keep the largest strongly connected set of edges so no vehicle can ever reach a dead end
   const kept = largestComponent(edges, (e) => e.moves.map((m) => m.to));
   const genShortKept = edges.filter((e) => e.general).length;
@@ -1021,12 +1029,14 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
   nodes = nodes.filter((n) => n.in && n.out);
   nodes.forEach((n, i) => (n.id = i));
 
+  yield;
   // 8. Signalized intersections are exactly the ones with signal heads (street-details.js)
   for (const s of signalIntersections) {
     const n = nodes.find((m) => Math.abs(m.x - s.x) < 6 && Math.abs(m.z - s.z) < 6); // same tolerance as nodeAt
     if (n) n.signal = true;
   }
 
+  yield;
   // 9. Sides & right of way at each node, for traffic.js. Its arms are its sides (one crosswalk and approach each): a
   //    grid intersection keeps east 0, west 1, south 2, north 3, any other arm counts from 4. The arms of one road (on
   //    opposite sides) form a group: vehicles of different groups never share the intersection box, and group 0 has
@@ -1058,6 +1068,13 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
 
   const isRoadClear = (x, z, clear = 0.15) => !blockedOnStreet(x, z, clear);
   return { nodes, edges, paintEdges, connector, curvePoint, walkable, onSidewalk, isRoadClear };
+}
+
+function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
+  const job = buildRoadNetworkSteps(sidewalks, obstacles, signalIntersections);
+  let step = job.next();
+  while (!step.done) step = job.next();
+  return step.value;
 }
 
 // The largest strongly connected set of `list` (a Set), going on from item e to the items next(e)
@@ -1180,4 +1197,4 @@ function curvePoint(c, s, out) {
   return out;
 }
 
-export { buildRoadNetwork, CROSSWALK };
+export { buildRoadNetwork, buildRoadNetworkSteps, CROSSWALK };

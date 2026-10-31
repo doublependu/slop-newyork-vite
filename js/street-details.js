@@ -15,9 +15,9 @@ import {
   LANDMARK_SITES
 } from './city-config.js';
 import { cityUniforms, createSteamMaterial, createTreeGrateMaterial, createGodRayMaterial } from './tsl-materials.js';
-import { createTreeField } from './trees.js';
+import { createTreeFieldSteps } from './trees.js';
 import { REAL_TREES } from './tree-geodata.js';
-import { placeStreetTrees } from './tree-placements.js';
+import { placeStreetTreesSteps } from './tree-placements.js';
 import { createSubwayEntranceParts, createFoodCartParts } from './street-props.js';
 import { createSubwayEntrances } from './subway-entrances.js';
 import { pavedPlazaRects, centralParkClearings, parkTreeSites, parkLampSites } from './city-grid.js';
@@ -101,7 +101,7 @@ function createWalkSignalMaterial(clock) {
   return mat;
 }
 
-function buildStreetDetails(scene, colliders = []) {
+function* buildStreetDetails(scene, colliders = [], lightPools) {
   const group = new THREE.Group();
   group.name = 'ManhattanStreetDetails';
 
@@ -173,8 +173,11 @@ function buildStreetDetails(scene, colliders = []) {
   ]);
   const pedGlobeGeo = new THREE.SphereGeometry(0.23, 8, 6).translate(0, 3.84, 0);
 
+  yield;
   // =========================================================================
+  yield;
   // 1. NYC CANTILEVERED TRAFFIC SIGNALS, STREET BLADES & WALK SIGNALS
+  yield;
   // =========================================================================
   const poleMatrices = [];
   const armMatrices = [];
@@ -238,6 +241,7 @@ function buildStreetDetails(scene, colliders = []) {
 
   // Use each avenue's local width and the street's real runs, including gaps at Central Park and road ends.
   for (const ave of ALL_AVENUES) {
+    yield;
     if (ave.isHighway) continue;
     for (const st of ALL_STREETS) {
       const avenueRun = ave.segs?.find((s) => st.z >= s.z0 && st.z <= s.z1);
@@ -333,14 +337,18 @@ function buildStreetDetails(scene, colliders = []) {
     }
   }
 
+  yield;
   // =========================================================================
+  yield;
   // 2. MID-BLOCK AVENUE & STREET ORNAMENTAL ACORN & COBRA STREETLIGHTS
   //    Placed directly along the true curb edges of every city block (BLOCKS)
   //    and verified with blockAt(x, z) so no pole ever stands in any roadway.
+  yield;
   // =========================================================================
   const allBlocks = BLOCKS || [];
 
   for (const b of allBlocks) {
+    yield;
     if (!b || !b.poly || b.poly.length < 3 || b.median || b.park > 0.6) continue;
 
     const poly = b.poly;
@@ -503,15 +511,25 @@ function buildStreetDetails(scene, colliders = []) {
   }
 
   addMatrixArrayInstanced(unitCyl, poleMetalMat, poleMatrices);
+  yield;
   addMatrixArrayInstanced(unitBox, poleMetalMat, armMatrices);
+  yield;
   addMatrixArrayInstanced(signalHousingGeo, signalHousingMat, yellowBoxMatrices);
+  yield;
   addMatrixArrayInstanced(signalLensGeo, aveSignalLensMat, aveLensMatrices, false);
+  yield;
   addMatrixArrayInstanced(signalLensGeo, streetSignalLensMat, streetLensMatrices, false);
+  yield;
   addMatrixArrayInstanced(unitBox, streetBladeMat, streetBladeMatrices);
+  yield;
   addMatrixArrayInstanced(walkHousingGeo, signalHousingMat, walkBoxMatrices);
+  yield;
   addMatrixArrayInstanced(walkPanelGeo, walkSignalGlow, walkBoxMatrices, false);
+  yield;
   addMatrixArrayInstanced(lampHousingGeo, poleMetalMat, lampHeadMatrices);
+  yield;
   addMatrixArrayInstanced(lampLensGeo, lampBulbGlow, lampHeadMatrices, false);
+  yield;
   const pedPosts = addMatrixArrayInstanced(pedLampPostGeo, poleMetalMat, pedPostMatrices);
   // ~28k posts: they cast as 4-sided base + shaft (16 triangles instead of 120; scene-culling.js shadow stand-ins)
   if (pedPosts) {
@@ -521,9 +539,13 @@ function buildStreetDetails(scene, colliders = []) {
     ]);
   }
   addMatrixArrayInstanced(pedGlobeGeo, pedGlobeGlow, pedPostMatrices, false);
+  yield;
 
+  yield;
   // =========================================================================
+  yield;
   // 2B. VOLUMETRIC GOLDEN-HOUR CANYON SUN SHAFTS (GOD RAYS)
+  yield;
   // =========================================================================
   const godRayMat = createGodRayMaterial();
   const godRayGeo = new THREE.PlaneGeometry(54, 92);
@@ -543,9 +565,12 @@ function buildStreetDetails(scene, colliders = []) {
     group.add(shaft);
   }
 
+  yield;
   // =========================================================================
+  yield;
   // 3. CON EDISON ORANGE/WHITE STRIPED STEAM STACKS, NYCDOT SAWHORSE BARRICADES
   //    & BILLOWING WIND-DRIFTED VOLUMETRIC STEAM CLOUD TRAILS (REFERENCE PHOTO!)
+  yield;
   // =========================================================================
   const steamLocations = [
     { x: 6.4,   z: 96,   windX: -1.0, windZ: -0.18 }, // 5th Ave & 37th St (Buffer zone clear of green bike lane!)
@@ -677,9 +702,13 @@ function buildStreetDetails(scene, colliders = []) {
   }
 
   addMatrixArrayInstanced(unitCyl, steamOrangeMat, orangeMatrices);
+  yield;
   addMatrixArrayInstanced(unitCyl, steamWhiteMat, whiteMatrices);
+  yield;
   addMatrixArrayInstanced(unitBox, steamOrangeMat, barricadeOrangeMatrices);
+  yield;
   addMatrixArrayInstanced(unitBox, steamWhiteMat, barricadeWhiteMatrices);
+  yield;
 
   const steamSpriteGeo = new THREE.PlaneGeometry(1, 1);
   steamSpriteGeo.setAttribute('aSmokeOrigin', new THREE.InstancedBufferAttribute(smokeOriginArr, 3));
@@ -691,8 +720,11 @@ function buildStreetDetails(scene, colliders = []) {
   steamInstancedSprites.renderOrder = 2;
   group.add(steamInstancedSprites);
 
+  yield;
   // =========================================================================
+  yield;
   // 4. MTA SUBWAY ENTRANCES WITH GLOWING GREEN GLOBE LAMPS
+  yield;
   // =========================================================================
   const subwaySites = createSubwayEntrances(colliders, footprints);
   const subwayMatrices = [];
@@ -714,8 +746,11 @@ function buildStreetDetails(scene, colliders = []) {
     addMatrixArrayInstanced(part.geometry, part.material, subwayMatrices, part.castShadow);
   }
 
+  yield;
   // =========================================================================
+  yield;
   // 5. NYC HOT DOG / HALAL FOOD CARTS
+  yield;
   // =========================================================================
   // Keep the whole prop on the sidewalk, outside building lots.
   const findPropSite = (x, z, width, depth) => {
@@ -772,12 +807,16 @@ function buildStreetDetails(scene, colliders = []) {
     addMatrixArrayInstanced(part.geometry, part.material, cartMatrices, part.castShadow);
   }
 
+  yield;
   // =========================================================================
+  yield;
   // 6. FIRE HYDRANTS & USPS BLUE MAILBOXES ALONG CURBS (INSTANCED)
+  yield;
   // =========================================================================
   const hydrantPositions = [];
   const mailboxPositions = [];
   for (const ave of AVENUES) {
+    yield;
     for (let row = 0; row < STREETS.length - 1; row++) {
       const zMid = (STREETS[row].z + STREETS[row + 1].z) * 0.5;
       const h1 = [ave.x - ave.width * 0.5 - 0.8, zMid - 16];
@@ -812,9 +851,12 @@ function buildStreetDetails(scene, colliders = []) {
   mailboxInst.instanceMatrix.needsUpdate = true;
   group.add(mailboxInst);
 
+  yield;
   // =========================================================================
+  yield;
   // 7. LUSH TREES: PARKS & PLAZAS, CENTRAL PARK WOODLANDS, AVENUE & CROSS-STREET TREES
   //    London planes, honey locusts & American elms (one unified trunk + crown instanced mesh per species & band)
+  yield;
   // =========================================================================
   const treePositions = []; // { x, y, z, scale, species (0 plane, 1 honey locust, 2 elm / oak) }
   const CP_LAWN_Y = 1.19;
@@ -931,10 +973,10 @@ function buildStreetDetails(scene, colliders = []) {
   for (const s of parkTreeSites || []) treePositions.push(s);
 
   // Surveyed street trees; parks keep their authored terrain, clearings and tree layouts.
-  let sidewalkTreePositions = placeStreetTrees(REAL_TREES, treePositions,
+  let sidewalkTreePositions = yield* placeStreetTreesSteps(REAL_TREES, treePositions,
     (x, z) => !inPlaza(x, z, 1.5) && isClearOfPoles(x, z, 2.2));
   for (const tree of sidewalkTreePositions) treePositions.push(tree);
-  const treeField = createTreeField(scene, treePositions, [...colliders, ...subwayColliders]);
+  const treeField = yield* createTreeFieldSteps(scene, treePositions, [...colliders, ...subwayColliders]);
   group.add(treeField.group);
   sidewalkTreePositions = sidewalkTreePositions.filter((t) => treeField.sites.has(t));
   console.info(`[streetDetails] ${treeField.stats.trees} trees (${sidewalkTreePositions.length} street trees)`);
@@ -991,39 +1033,19 @@ function buildStreetDetails(scene, colliders = []) {
     return s - Math.floor(s);
   }
 
+  yield;
   // =========================================================================
+  yield;
   // 8. CLUSTERED STREETLIGHTS & STREET FURNITURE LIGHT POOLS
+  yield;
   // =========================================================================
   for (const s of parkLampSites || []) {
     streetPointSites.push({ x: s.x, y: s.y, z: s.z, color: 0xffe4b4, intensity: 32, dist: 14.0 });
   }
 
-  const STREETLIGHT_SPOT_POOL = 36;
-  const STREET_POINT_POOL = 48;
   const STREETLIGHT_DIST = 115;
   const STREET_POINT_DIST = 110;
-
-  const streetLightsGroup = new THREE.Group();
-  streetLightsGroup.name = 'StreetClusteredLights';
-  scene.add(streetLightsGroup);
-
-  const streetlightSpotPool = [];
-  for (let i = 0; i < STREETLIGHT_SPOT_POOL; i++) {
-    // Cobra-head LED luminaire: wide downward spread (0.96 rad half-angle) illuminating both road and sidewalk
-    const spot = new THREE.SpotLight(0xffe8c2, 0, 25, 0.96, 0.82, 1.25);
-    spot.position.set(0, -1000, 0);
-    spot.target.position.set(0, -1001, 0);
-    streetLightsGroup.add(spot, spot.target);
-    streetlightSpotPool.push(spot);
-  }
-
-  const streetPointPool = [];
-  for (let i = 0; i < STREET_POINT_POOL; i++) {
-    const pt = new THREE.PointLight(0xffe4b4, 0, 12, 1.35);
-    pt.position.set(0, -1000, 0);
-    streetLightsGroup.add(pt);
-    streetPointPool.push(pt);
-  }
+  const { streetSpots: streetlightSpotPool, streetPoints: streetPointPool } = lightPools;
 
   // Source positions are static. Query nearby cells instead of scanning the island every frame.
   const LIGHT_CELL = 128;
@@ -1078,11 +1100,11 @@ function buildStreetDetails(scene, colliders = []) {
     // Increase streetlight intensity toward dusk.
     const lampScale = Math.min(1.25, Math.max(0.0, (glow - 0.36) * 1.15));
     if (lampScale <= 0.001) {
-      for (let i = 0; i < STREETLIGHT_SPOT_POOL; i++) {
+      for (let i = 0; i < streetlightSpotPool.length; i++) {
         streetlightSpotPool[i].intensity = 0;
         streetlightSpotPool[i].position.set(0, -1000, 0);
       }
-      for (let i = 0; i < STREET_POINT_POOL; i++) {
+      for (let i = 0; i < streetPointPool.length; i++) {
         streetPointPool[i].intensity = 0;
         streetPointPool[i].position.set(0, -1000, 0);
       }
@@ -1091,10 +1113,10 @@ function buildStreetDetails(scene, colliders = []) {
 
     const cobraCount = nearbyLights(cobraCells, camera, STREETLIGHT_DIST, activeCobras);
 
-    const cobraCutoff = cobraCount > STREETLIGHT_SPOT_POOL
-      ? Math.min(STREETLIGHT_DIST, activeCobras[STREETLIGHT_SPOT_POOL]._effDist)
+    const cobraCutoff = cobraCount > streetlightSpotPool.length
+      ? Math.min(STREETLIGHT_DIST, activeCobras[streetlightSpotPool.length]._effDist)
       : STREETLIGHT_DIST;
-    const spotUsed = Math.min(cobraCount, STREETLIGHT_SPOT_POOL);
+    const spotUsed = Math.min(cobraCount, streetlightSpotPool.length);
     for (let i = 0; i < spotUsed; i++) {
       const s = activeCobras[i];
       const fade = smoothFade(s._effDist, cobraCutoff * 0.62, cobraCutoff);
@@ -1104,17 +1126,17 @@ function buildStreetDetails(scene, colliders = []) {
       spot.target.updateMatrixWorld();
       spot.intensity = 88.0 * lampScale * fade;
     }
-    for (let i = spotUsed; i < STREETLIGHT_SPOT_POOL; i++) {
+    for (let i = spotUsed; i < streetlightSpotPool.length; i++) {
       streetlightSpotPool[i].intensity = 0;
       streetlightSpotPool[i].position.set(0, -1000, 0);
     }
 
     const ptCount = nearbyLights(pointCells, camera, STREET_POINT_DIST, activePoints);
 
-    const ptCutoff = ptCount > STREET_POINT_POOL
-      ? Math.min(STREET_POINT_DIST, activePoints[STREET_POINT_POOL]._effDist)
+    const ptCutoff = ptCount > streetPointPool.length
+      ? Math.min(STREET_POINT_DIST, activePoints[streetPointPool.length]._effDist)
       : STREET_POINT_DIST;
-    const ptUsed = Math.min(ptCount, STREET_POINT_POOL);
+    const ptUsed = Math.min(ptCount, streetPointPool.length);
     for (let i = 0; i < ptUsed; i++) {
       const s = activePoints[i];
       const fade = smoothFade(s._effDist, ptCutoff * 0.62, ptCutoff);
@@ -1124,7 +1146,7 @@ function buildStreetDetails(scene, colliders = []) {
       pt.distance = s.dist;
       pt.intensity = s.intensity * lampScale * fade;
     }
-    for (let i = ptUsed; i < STREET_POINT_POOL; i++) {
+    for (let i = ptUsed; i < streetPointPool.length; i++) {
       streetPointPool[i].intensity = 0;
       streetPointPool[i].position.set(0, -1000, 0);
     }

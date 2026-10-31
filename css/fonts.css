@@ -1,0 +1,25 @@
+/* Self-hosted Latin subsets, so the game makes no third-party requests and the offline file carries its own type.
+   These are the only faces the UI and canvases ask for; Inter stops at 800 as the original Google Fonts request did. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400 800;
+  src: url('../node_modules/@fontsource-variable/inter/files/inter-latin-opsz-normal.woff2') format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'Overpass';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url('../node_modules/@fontsource/overpass/files/overpass-latin-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Overpass';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url('../node_modules/@fontsource/overpass/files/overpass-latin-700-normal.woff2') format('woff2');
+}

@@ -83,6 +83,7 @@ class CityAudioSystem {
     this.context = null;
     this.ready = false;
     this.disposed = false;
+    this.paused = false;
     this.supported = !!(globalThis.AudioContext || globalThis.webkitAudioContext);
     this.enabled = true;
     try { this.enabled = localStorage.getItem('nyc-sound') !== 'off'; } catch { /* Private browsing. */ }
@@ -99,7 +100,7 @@ class CityAudioSystem {
     this.lastHorn = -Infinity;
     this.collisionPairs = new WeakMap();
     this.collisionSequence = 0;
-    this.collisionSystems = [simulation.controllerManager, simulation.trafficSystem];
+    this.collisionSystems = [simulation.controllerManager];
     this.onCollision = (impact) => this.crash(impact);
     for (const system of this.collisionSystems) system.setCollisionListener?.(this.onCollision);
     this.motorParams = { speed: 0, load: 0, verticalSpeed: 0, doppler: 1, seed: 0 };
@@ -120,13 +121,19 @@ class CityAudioSystem {
     document.addEventListener('visibilitychange', this.onVisibility);
   }
 
+  attachCity(city) {
+    this.sources.attachCity(city);
+    this.collisionSystems.push(city.trafficSystem);
+    city.trafficSystem.setCollisionListener?.(this.onCollision);
+  }
+
   unlock() {
-    if (!this.supported || !this.enabled || this.disposed || document.hidden) return;
+    if (!this.supported || !this.enabled || this.disposed || this.paused || document.hidden) return;
     try {
       if (!this.context) this.initialize();
       if (this.context.state !== 'running') {
         this.context.resume().then(() => {
-          if (!this.enabled || document.hidden || this.disposed) return this.suspend();
+          if (!this.enabled || this.paused || document.hidden || this.disposed) return this.suspend();
           this.onStateChange();
         }).catch(() => {}); // A later user gesture can retry autoplay/interruption failures.
       }
@@ -189,8 +196,14 @@ class CityAudioSystem {
     // Visibility/mute can change again while suspend is pending. Reconcile after it settles so a rapid unmute
     // cannot leave an enabled system suspended merely because resume saw the old 'running' state.
     return this.context.suspend().then(() => {
-      if (this.enabled && !document.hidden && !this.disposed) this.unlock();
+      if (this.enabled && !this.paused && !document.hidden && !this.disposed) this.unlock();
     }).catch(() => {});
+  }
+
+  setPaused(paused) {
+    this.paused = paused;
+    if (paused) this.suspend();
+    else if (this.enabled && this.context) this.unlock();
   }
 
   reset() {

@@ -1,3 +1,4 @@
+import { Ready } from './world-jobs.js';
 import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createFireEscapes } from './fire-escapes.js';
@@ -34,7 +35,7 @@ import {
 } from './tsl-materials.js';
 import { GEO } from './nyc-geodata.js';
 import { REAL_BUILDINGS } from './building-geodata.js';
-import { createBuildingFootprints } from './building-footprints.js';
+import { createBuildingFootprintsSteps } from './building-footprints.js';
 import { polygonContains, polygonBoxOverlaps } from './building-collision.js';
 import { pavedPlazaRects, parkTreeSites, sidewalkBlocks } from './city-grid.js';
 
@@ -145,7 +146,10 @@ class Quadtree {
   }
 }
 
-function buildCityBlocks(scene, landmarkColliders = []) {
+// Buildings within this distance of the player are ready before the loading screen drops
+const START_RADIUS = 450;
+
+function* buildCityBlocks(scene, lateStage, landmarkColliders = [], focus = { x: 0, z: 62 }) {
   const group = new THREE.Group();
   group.name = 'ManhattanCityBlocks';
   const colliders = [];
@@ -251,7 +255,8 @@ function buildCityBlocks(scene, landmarkColliders = []) {
   }).filter(Boolean);
   // Keep the authored landmark models; the survey supplies the surrounding buildings.
   const surveyedBuildings = REAL_BUILDINGS.filter((b) => !LANDMARK_RESERVE.some((h) =>
-    b.polygons.some((p) => polygonContains({ outer: p.outer, holes: [] }, h.x, h.z)))
+    h.x >= b.minX && h.x <= b.maxX && h.z >= b.minZ && h.z <= b.maxZ
+    && b.polygons.some((p) => polygonContains({ outer: p.outer, holes: [] }, h.x, h.z)))
     && !landmarkColliders.some((c) => b.minX < c.maxX && b.maxX > c.minX && b.minZ < c.maxZ && b.maxZ > c.minZ
       && b.polygons.some((p) => polygonBoxOverlaps(p, (c.minX + c.maxX) / 2, (c.minZ + c.maxZ) / 2,
         (c.maxX - c.minX) / 2, (c.maxZ - c.minZ) / 2))));
@@ -260,12 +265,13 @@ function buildCityBlocks(scene, landmarkColliders = []) {
   const hitR = (a, x0, x1, z0, z1) => a.x0 < x1 && a.x1 > x0 && a.z0 < z1 && a.z1 > z0;
   const buildingReserves = [];
   const reserveCells = new Map();
+  const reserveKey = (ix, iz) => (ix + 4096) * 8192 + (iz + 4096);
   function addReserve(r) {
     const index = buildingReserves.length;
     buildingReserves.push(r);
     for (let ix = Math.floor(r.x0 / 128); ix <= Math.floor(r.x1 / 128); ix++) {
       for (let iz = Math.floor(r.z0 / 128); iz <= Math.floor(r.z1 / 128); iz++) {
-        const key = ix + ',' + iz;
+        const key = reserveKey(ix, iz);
         if (!reserveCells.has(key)) reserveCells.set(key, []);
         reserveCells.get(key).push(index);
       }
@@ -280,7 +286,7 @@ function buildCityBlocks(scene, landmarkColliders = []) {
     const found = new Set();
     for (let ix = Math.floor(minX / 128); ix <= Math.floor(maxX / 128); ix++) {
       for (let iz = Math.floor(minZ / 128); iz <= Math.floor(maxZ / 128); iz++) {
-        for (const index of reserveCells.get(ix + ',' + iz) || []) {
+        for (const index of reserveCells.get(reserveKey(ix, iz)) || []) {
           if (hitR(buildingReserves[index], minX, maxX, minZ, maxZ)) found.add(index);
         }
       }
@@ -340,153 +346,8 @@ function buildCityBlocks(scene, landmarkColliders = []) {
     }
   }
 
-  const surveyedBuckets = materials.map(() => []);
-  const detailsToPlace = [];
-  for (const b of surveyedBuildings) {
-    const seed = Math.round(b.cx * 31 + b.cz * 17);
-    const rand = mulberry32(seed);
-    const tone = rand();
-    const mat = b.year && b.year < 1945 ? (tone < 0.8 ? 0 : 1)
-      : b.year && b.year < 1980 ? (tone < 0.55 ? 0 : 3)
-        : tone < 0.6 ? 2 : 4;
-    // The survey has no building-use data; choose retail independently of facade style and roof details.
-    const storefronts = b.height >= 6 && mulberry32(seed ^ 0x53544f52)() < 0.55;
-    const record = { ...b, tone, storefronts };
-    surveyedBuckets[mat].push(record);
-    const detail = {
-      cx: b.cx, cz: b.cz, minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ,
-      cornices: [], waterTowers: [], hvacUnits: [], fireEscapes: [], awnings: [], scaffoldSheds: [], footprints: []
-    };
-    const top = b.height + 0.22;
-    for (const polygon of b.polygons) {
-      const xs = polygon.outer.map((p) => p.x), zs = polygon.outer.map((p) => p.z);
-      const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
-      colliders.push({ minX, maxX, minZ, maxZ, minY: 0, maxY: top, polygon });
-      detail.footprints.push({ h: top, pts: polygon.outer, holes: polygon.holes });
-    }
-    const neighbours = nearbyReserves(b, 6);
-    addSurveyedFireEscapes(b, detail, storeys[mat], neighbours);
-    detailsToPlace.push({ b: record, detail, masonry: mat < 2, rand });
-    allBlocks.push(detail);
-  }
-  // Reserve every fire escape before placing storefronts on neighbouring buildings.
-  for (const { b, detail, masonry, rand } of detailsToPlace) {
-    const neighbours = nearbyReserves(b, 6);
-    for (const reserve of addBuildingDetails(b, detail, { masonry, rand, neighbours })) addReserve(reserve);
-    quadtree.insert(detail);
-  }
-  surveyedBuckets.forEach((items, i) => {
-    if (!items.length) return;
-    group.add(createBuildingFootprints(materials[i], items, i < 2 ? b => nearbyReserves(b, 2) : undefined));
-  });
-
-  // Narrow empty lots become sitting areas with trees.
-  {
-    const plazas = pavedPlazaRects || [];
-    const sites = parkTreeSites;
-    const hit = (r, x0, x1, z0, z1) => r.minX < x1 && r.maxX > x0 && r.minZ < z1 && r.maxZ > z0;
-    for (const s of (sites && sidewalkBlocks) || []) {
-      const x0 = s.cx - s.w / 2;
-      const x1 = s.cx + s.w / 2;
-      const z0 = s.cz - s.d / 2;
-      const z1 = s.cz + s.d / 2;
-      if (s.cover || (s.block && (s.block.median || s.block.park > 0.6))) continue;
-      const narrow = Math.min(s.w, s.d);
-      if (narrow < 8 || narrow > 26 || Math.max(s.w, s.d) < 20) continue;
-      if (allBlocks.some((b) => hit(b, x0 + 2, x1 - 2, z0 + 2, z1 - 2)) || plazas.some((r) => hit(r, x0, x1, z0, z1))) continue;
-      if (overlapsParkOrLandmark(x0, x1, z0, z1)) continue;
-      const alongX = s.w > s.d;
-      const len = alongX ? s.w : s.d;
-      const n = Math.max(1, Math.floor((len - 6) / 8));
-      const lanes = narrow >= 15 ? [-narrow / 4, narrow / 4] : [0];
-      for (let i = 0; i < n; i++) {
-        const t = (i + 0.5) / n - 0.5;
-        for (const [j, o] of lanes.entries()) {
-          const u = (len - 6) * t + (j % 2) * 2;
-          const x = alongX ? s.cx + u : s.cx + o;
-          const z = alongX ? s.cz + o : s.cz + u;
-          const h = Math.abs(Math.sin(x * 12.9898 + z * 78.233) * 43758.5453) % 1;
-          sites.push({ x, y: 0.22, z, scale: 0.8 + h * 0.3, species: h < 0.55 ? 1 : 0, tier: 1 });
-        }
-      }
-    }
-  }
-
-  // Times Square: tiers of billboards up every street wall that looks onto the bowtie (podiums and the tower
-  //     shafts set back above them alike), from above the storefront marquees to ~62 m, split into screens up to
-  //     ~26 m wide (the odd screen left out)
-  if (TS) {
-    const hash = (a, b) => Math.abs(Math.sin(a * 12.9898 + b * 78.233) * 43758.5453) % 1;
-    function addBillboards(cx, cz, nx, nz, length, base, top) {
-      if (length < 8 || top - base < 8) return;
-      const ax = -nz, az = nx;
-      const seen = [0.2, 0.5, 0.8].some((t) => [6, 12, 20, 30].some((d) => {
-        const u = (t - 0.5) * length;
-        return inBowtie(cx + nx * d + ax * u, cz + nz * d + az * u);
-      }));
-      if (!seen) return;
-      const n = Math.max(1, Math.ceil((length - 2) / 26));
-      const pw = (length - 2 - (n - 1) * 1.2) / n;
-      for (let i = 0; i < n; i++) {
-        const u = -length * 0.5 + 1 + i * (pw + 1.2) + pw * 0.5;
-        let y = base;
-        for (let tier = 0; y < top - 6; tier++) {
-          const h = Math.min(top - y, 8 + 8 * hash(u + tier, cx));
-          if (h < 6) break;
-          if (hash(cz + tier, u) > 0.12) {
-            broadwayBillboards.push({
-              x: cx + nx * 0.35 + ax * u,
-              y: y + h * 0.5,
-              z: cz + nz * 0.35 + az * u,
-              w: pw,
-              h,
-              rotY: Math.atan2(nx, nz),
-              variant: Math.floor(hash(cx + i, cz + tier) * 6)
-            });
-          }
-          y += h + 1.2;
-        }
-      }
-    }
-    for (const b of surveyedBuildings) {
-      if (b.maxZ < TS.zN - 40 || b.minZ > TS.zS + 40 || Math.abs(b.cx - TS.x7) > 280) continue;
-      for (const { outer } of b.polygons) {
-        for (let i = 0; i < outer.length; i++) {
-          const a = outer[i], c = outer[(i + 1) % outer.length];
-          const dx = c.x - a.x, dz = c.z - a.z, length = Math.hypot(dx, dz);
-          if (length < 8) continue;
-          addBillboards((a.x + c.x) / 2, (a.z + c.z) / 2, dz / length, -dx / length,
-            length, 7.5, Math.min(b.height + 0.22 - 2, 62));
-        }
-      }
-    }
-  }
-
-  // ============================================================================
-  // STATIC BILLBOARDS
-  // ============================================================================
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
   const dummy = new THREE.Object3D();
-
-  // Billboards: one merged mesh per poster theme
-  {
-    const byVariant = new Map();
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const up = new THREE.Vector3(0, 1, 0);
-    for (const bb of broadwayBillboards) {
-      const g = new THREE.PlaneGeometry(bb.w, bb.h);
-      g.applyMatrix4(m.compose(new THREE.Vector3(bb.x, bb.y, bb.z), q.setFromAxisAngle(up, bb.rotY), new THREE.Vector3(1, 1, 1)));
-      if (!byVariant.has(bb.variant)) byVariant.set(bb.variant, []);
-      byVariant.get(bb.variant).push(g);
-    }
-    for (const [variant, geos] of byVariant) {
-      const mesh = new THREE.Mesh(mergeGeometries(geos), createBillboardMaterial(variant));
-      mesh.name = `TimesSquareBillboards_${variant}`;
-      group.add(mesh);
-      for (const g of geos) g.dispose();
-    }
-  }
 
   // ============================================================================
   // STREAMED ARCHITECTURAL DETAILS
@@ -898,17 +759,176 @@ function buildCityBlocks(scene, landmarkColliders = []) {
     }
   }
 
-  // Initial Quadtree stream centered at Midtown 5th Ave & 42nd St
-  update(0, 62, true);
+  // Nearest first: the starting view needs these before the loading screen drops, the rest can follow behind the game
+  function* placeBuildings(buildings, target) {
+  const surveyedBuckets = materials.map(() => []);
+  const detailsToPlace = [];
+  for (const b of buildings) {
+    const seed = Math.round(b.cx * 31 + b.cz * 17);
+    const rand = mulberry32(seed);
+    const tone = rand();
+    const mat = b.year && b.year < 1945 ? (tone < 0.8 ? 0 : 1)
+      : b.year && b.year < 1980 ? (tone < 0.55 ? 0 : 3)
+        : tone < 0.6 ? 2 : 4;
+    // The survey has no building-use data; choose retail independently of facade style and roof details.
+    const storefronts = b.height >= 6 && mulberry32(seed ^ 0x53544f52)() < 0.55;
+    const record = { ...b, tone, storefronts };
+    surveyedBuckets[mat].push(record);
+    const detail = {
+      cx: b.cx, cz: b.cz, minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ,
+      cornices: [], waterTowers: [], hvacUnits: [], fireEscapes: [], awnings: [], scaffoldSheds: [], footprints: []
+    };
+    const top = b.height + 0.22;
+    for (const polygon of b.polygons) {
+      const xs = polygon.outer.map((p) => p.x), zs = polygon.outer.map((p) => p.z);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
+      colliders.push({ minX, maxX, minZ, maxZ, minY: 0, maxY: top, polygon });
+      detail.footprints.push({ h: top, pts: polygon.outer, holes: polygon.holes });
+    }
+    const neighbours = nearbyReserves(b, 6);
+    addSurveyedFireEscapes(b, detail, storeys[mat], neighbours);
+    detailsToPlace.push({ b: record, detail, masonry: mat < 2, rand });
+    allBlocks.push(detail);
+    yield;
+  }
+  // Reserve every fire escape before placing storefronts on neighbouring buildings.
+  for (const { b, detail, masonry, rand } of detailsToPlace) {
+    const neighbours = nearbyReserves(b, 6);
+    for (const reserve of addBuildingDetails(b, detail, { masonry, rand, neighbours })) addReserve(reserve);
+    quadtree.insert(detail);
+    yield;
+  }
+  for (const [i, items] of surveyedBuckets.entries()) {
+    if (!items.length) continue;
+    target.add(yield* createBuildingFootprintsSteps(materials[i], items, i < 2 ? b => nearbyReserves(b, 2) : undefined));
+    yield;
+  }
+  }
 
-  scene.add(group);
-  return {
-    group,
-    colliders,
-    allBlocks,
-    update,
-    updateLights
-  };
+
+  const distanceToFocus = (b) => Math.hypot(b.cx - focus.x, b.cz - focus.z);
+  const nearBuildings = surveyedBuildings.filter((b) => distanceToFocus(b) <= START_RADIUS);
+  const farBuildings = surveyedBuildings.filter((b) => distanceToFocus(b) > START_RADIUS);
+  // The roof and street-front details stay in `group`: main.js adds it after the first frame
+  const nearGroup = new THREE.Group();
+  nearGroup.name = 'ManhattanCityBlocksNear';
+  yield* placeBuildings(nearBuildings, nearGroup);
+  update(focus.x, focus.z, true);
+  scene.add(nearGroup);
+  const cityBlocks = { group, colliders, allBlocks, update, updateLights };
+  yield new Ready(cityBlocks);
+
+  const farGroup = new THREE.Group();
+  farGroup.name = 'ManhattanCityBlocksFar';
+  yield* placeBuildings(farBuildings, farGroup);
+
+  // Narrow empty lots become sitting areas with trees.
+  {
+    const plazas = pavedPlazaRects || [];
+    const sites = parkTreeSites;
+    const hit = (r, x0, x1, z0, z1) => r.minX < x1 && r.maxX > x0 && r.minZ < z1 && r.maxZ > z0;
+    for (const s of (sites && sidewalkBlocks) || []) {
+      const x0 = s.cx - s.w / 2;
+      const x1 = s.cx + s.w / 2;
+      const z0 = s.cz - s.d / 2;
+      const z1 = s.cz + s.d / 2;
+      if (s.cover || (s.block && (s.block.median || s.block.park > 0.6))) continue;
+      const narrow = Math.min(s.w, s.d);
+      if (narrow < 8 || narrow > 26 || Math.max(s.w, s.d) < 20) continue;
+      if (allBlocks.some((b) => hit(b, x0 + 2, x1 - 2, z0 + 2, z1 - 2)) || plazas.some((r) => hit(r, x0, x1, z0, z1))) continue;
+      if (overlapsParkOrLandmark(x0, x1, z0, z1)) continue;
+      const alongX = s.w > s.d;
+      const len = alongX ? s.w : s.d;
+      const n = Math.max(1, Math.floor((len - 6) / 8));
+      const lanes = narrow >= 15 ? [-narrow / 4, narrow / 4] : [0];
+      for (let i = 0; i < n; i++) {
+        const t = (i + 0.5) / n - 0.5;
+        for (const [j, o] of lanes.entries()) {
+          const u = (len - 6) * t + (j % 2) * 2;
+          const x = alongX ? s.cx + u : s.cx + o;
+          const z = alongX ? s.cz + o : s.cz + u;
+          const h = Math.abs(Math.sin(x * 12.9898 + z * 78.233) * 43758.5453) % 1;
+          sites.push({ x, y: 0.22, z, scale: 0.8 + h * 0.3, species: h < 0.55 ? 1 : 0, tier: 1 });
+        }
+      }
+    }
+  }
+
+  // Times Square: tiers of billboards up every street wall that looks onto the bowtie (podiums and the tower
+  //     shafts set back above them alike), from above the storefront marquees to ~62 m, split into screens up to
+  //     ~26 m wide (the odd screen left out)
+  if (TS) {
+    const hash = (a, b) => Math.abs(Math.sin(a * 12.9898 + b * 78.233) * 43758.5453) % 1;
+    function addBillboards(cx, cz, nx, nz, length, base, top) {
+      if (length < 8 || top - base < 8) return;
+      const ax = -nz, az = nx;
+      const seen = [0.2, 0.5, 0.8].some((t) => [6, 12, 20, 30].some((d) => {
+        const u = (t - 0.5) * length;
+        return inBowtie(cx + nx * d + ax * u, cz + nz * d + az * u);
+      }));
+      if (!seen) return;
+      const n = Math.max(1, Math.ceil((length - 2) / 26));
+      const pw = (length - 2 - (n - 1) * 1.2) / n;
+      for (let i = 0; i < n; i++) {
+        const u = -length * 0.5 + 1 + i * (pw + 1.2) + pw * 0.5;
+        let y = base;
+        for (let tier = 0; y < top - 6; tier++) {
+          const h = Math.min(top - y, 8 + 8 * hash(u + tier, cx));
+          if (h < 6) break;
+          if (hash(cz + tier, u) > 0.12) {
+            broadwayBillboards.push({
+              x: cx + nx * 0.35 + ax * u,
+              y: y + h * 0.5,
+              z: cz + nz * 0.35 + az * u,
+              w: pw,
+              h,
+              rotY: Math.atan2(nx, nz),
+              variant: Math.floor(hash(cx + i, cz + tier) * 6)
+            });
+          }
+          y += h + 1.2;
+        }
+      }
+    }
+    for (const b of surveyedBuildings) {
+      if (b.maxZ < TS.zN - 40 || b.minZ > TS.zS + 40 || Math.abs(b.cx - TS.x7) > 280) continue;
+      for (const { outer } of b.polygons) {
+        for (let i = 0; i < outer.length; i++) {
+          const a = outer[i], c = outer[(i + 1) % outer.length];
+          const dx = c.x - a.x, dz = c.z - a.z, length = Math.hypot(dx, dz);
+          if (length < 8) continue;
+          addBillboards((a.x + c.x) / 2, (a.z + c.z) / 2, dz / length, -dx / length,
+            length, 7.5, Math.min(b.height + 0.22 - 2, 62));
+        }
+      }
+    }
+  }
+
+  // ============================================================================
+  // STATIC BILLBOARDS
+  // ============================================================================
+  // Billboards: one merged mesh per poster theme
+  {
+    const byVariant = new Map();
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const bb of broadwayBillboards) {
+      const g = new THREE.PlaneGeometry(bb.w, bb.h);
+      g.applyMatrix4(m.compose(new THREE.Vector3(bb.x, bb.y, bb.z), q.setFromAxisAngle(up, bb.rotY), new THREE.Vector3(1, 1, 1)));
+      if (!byVariant.has(bb.variant)) byVariant.set(bb.variant, []);
+      byVariant.get(bb.variant).push(g);
+    }
+    for (const [variant, geos] of byVariant) {
+      const mesh = new THREE.Mesh(mergeGeometries(geos), createBillboardMaterial(variant));
+      mesh.name = `TimesSquareBillboards_${variant}`;
+      farGroup.add(mesh);
+      for (const g of geos) g.dispose();
+    }
+  }
+
+  lateStage.add(farGroup);
+  return cityBlocks;
 }
 
 export { buildCityBlocks };

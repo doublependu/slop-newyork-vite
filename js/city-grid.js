@@ -1,3 +1,4 @@
+import { Ready } from './world-jobs.js';
 import * as THREE from 'three/webgpu';
 import {
   float,
@@ -1489,10 +1490,13 @@ function buildWaterfrontPiers(group) {
   B.build(group, new Set([BL, PA]));
 }
 
-function buildCityGrid(scene) {
+function* buildCityGrid(scene, lateStage) {
   streetGroundSurfaces = [];
-  const group = new THREE.Group();
+  let group = new THREE.Group();
   group.name = 'ManhattanCityGrid';
+  // Nothing in here is needed to start driving, so it joins the scene after the first frame
+  const details = new THREE.Group();
+  details.name = 'ManhattanCityGridDetails';
 
   const dummy = new THREE.Object3D();
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
@@ -1509,7 +1513,7 @@ function buildCityGrid(scene) {
   harborWaterGeo.rotateX(-Math.PI / 2);
   const harborWaterMesh = new THREE.Mesh(harborWaterGeo, waterMat);
   harborWaterMesh.position.set(0, ISLAND_BOUNDS.waterLevel, -50);
-  group.add(harborWaterMesh);
+  details.add(harborWaterMesh);
 
   // =========================================================================
   // 2. POLYGONAL MANHATTAN ISLAND SEAWALL BULKHEAD & ROADWAY ASPHALT DECK
@@ -1526,7 +1530,7 @@ function buildCityGrid(scene) {
     z: p.z + (p.z > 1350 ? 6 : (p.z < -1550 ? -6 : 0))
   }));
   const seawallMesh = createExtrudedPolygonMesh(seawallPolygon, -2.35, 2.31, seawallMat, true, false);
-  group.add(seawallMesh);
+  details.add(seawallMesh);
 
   // Unified Manhattan Roadway Asphalt Deck (Y = 0.0) following true Manhattan coastline
   const roadMat = createRoadSurfaceMaterial();
@@ -1619,6 +1623,13 @@ function buildCityGrid(scene) {
   curbInstanced.instanceMatrix.needsUpdate = true;
   group.add(swInstanced, curbInstanced);
 
+  // The road deck and the sidewalks are enough to start driving. Everything below arrives behind the game.
+  batchStaticGroupMeshes(group, new Set([roadMat]));
+  scene.add(group);
+  yield new Ready();
+  group = details;
+
+  yield;
   // 6. Times Square Pedestrian Plazas, Duffy Square TKTS Red Steps, Herald Square & Flatiron Plaza
   //    Curb-height light-grey granite paver plazas in Broadway's roadbed with granite benches & planters, plus the
   //    shared street-furniture instancing of the plazas & small parks (instanced at the end of section 7B)
@@ -1803,10 +1814,13 @@ function buildCityGrid(scene) {
     addLamp(bx.cx + 5.5, PLAZA_Y, pc.zS - 3);
   }
 
+  yield;
   // =========================================================================
+  yield;
   // 7. CENTRAL PARK (59th to 110th St, 5th Ave to Central Park West) from its real features (city-config.js GEO:
   //    the NYC Parks outline, OpenStreetMap's meadows, water bodies, loop drives & landmarks, the transverses from the
   //    street centreline)
+  yield;
   // =========================================================================
   const cpWallMat = new THREE.MeshStandardNodeMaterial({
     color: 0x6e6a63,
@@ -1992,6 +2006,7 @@ function buildCityGrid(scene) {
     mall: { x: mallX, z0: mallZ0, z1: mallZ0 + MALL_LEN }
   };
 
+  yield;
   // 6. Grand Army Plaza (5th Ave & 59th St: the Pulitzer Fountain, Sherman's gilded statue) & Columbus Circle
   const gapPlaza = new THREE.Mesh(new THREE.CylinderGeometry(16, 17, 0.45, 24), marbleArchMat);
   gapPlaza.position.set(gap.x, 0.25, gap.z);
@@ -2013,6 +2028,7 @@ function buildCityGrid(scene) {
   columbusColumn.position.set(colC.x, 9.5, colC.z);
   group.add(columbusColumn);
 
+  yield;
   // 7B. Madison Square Park, Union Square Park, Washington Square Park, Tompkins Square Park & Battery Park
   //     Flush with the sidewalks: hex-paver walks, granite-coped lawn beds with low hoop fences between radial &
   //     diagonal paths, a cast-iron perimeter fence on a granite coping, benches, lampposts & a dense plane canopy
@@ -2527,24 +2543,30 @@ function buildCityGrid(scene) {
   pavedPlazaRects = pavedRects;
   sidewalkBlocks = blockSidewalks; // { cx, cz, w, d } raised sidewalk slabs (cross-street tree rows)
 
+  yield;
   // =========================================================================
+  yield;
   // 8. AUTHENTIC HUDSON RIVER & EAST RIVER WATERFRONT PIERS (29 Piers)
+  yield;
   // =========================================================================
   // Concrete decks on timber piles with fenders, railings & lanterns, plus each pier's real structures:
   // cruise terminals, Chelsea Piers, Pier 57, Little Island, Pier 40, the Intrepid, the 79th St Boat Basin,
   // Pier 17, the Wavertree, Pier 15, Pier 11 and the Staten Island Ferry Whitehall Terminal (see buildWaterfrontPiers)
   buildWaterfrontPiers(group);
+  yield;
 
   // 9 & 10. The East River bridges, harbor islands and the surrounding boroughs are built by boroughs.js
 
+  yield;
   // 11. Manhattan's waterfront edge: esplanades, shore highways & riverside park belts (see buildManhattanWaterfrontEdge)
   const roadPaint = createRoadPaintChunkBuilder('RoadMarkings');
-  const highwayLanes = buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMat: cpLawnMat, curbMat, roadMat, roadPaint });
+  const highwayLanes = yield* buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMat: cpLawnMat, curbMat, roadMat, roadPaint });
 
+  yield;
   // Batch static sub-meshes by material to reduce per-frame WebGPU draw calls
   batchStaticGroupMeshes(group, new Set([waterMat, roadMat, cpLawnMat, cpMeadowMat]));
 
-  scene.add(group);
+  lateStage.add(group);
 
   // Raised sidewalk blocks bound the roads (the planted malls down Park Ave, Broadway & co. are obstacles in the
   // roadway, handed over with the footprints)
@@ -2574,7 +2596,7 @@ function buildCityGrid(scene) {
  * South of the Williamsburg Bridge the FDR leaves the strip for the South Street Viaduct (buildSouthStreetViaduct).
  * Everything is merged into a handful of meshes and keeps clear of the bridge towers standing near the shore.
  */
-function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMat, curbMat, roadMat, roadPaint }) {
+function* buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMat, curbMat, roadMat, roadPaint }) {
   const STEP = 3; // shore sampling (m of z)
   const HWY_W = 15.2; // 0.4 shoulder, 2 x 3.3 m lanes, 1.2 m median, 2 x 3.3 m lanes, 0.4 shoulder
   const COPING_Y = -0.04; // seawall coping top (section 2)
@@ -2584,6 +2606,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
   const smooth = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
   const shoreX = (z, west) => { const b = getIslandBoundsAtZ(z); return west ? b.westX : b.eastX; };
 
+  yield;
   // Keep clear: footprints (+1.5 m) of the bridge piers / caissons and Manhattan anchorages near the shore (any d), the
   // pier decks reaching up to ~4 m inland, the 79th St Boat Basin gangways and Basketball City's shed on Pier 36 (gaps
   // block elements closer to the water than dMax)
@@ -2614,6 +2637,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
   const blocked = (r, d) => towers.some((t) => inBox(t, X(r, d), r.z)) ||
     gaps.some((g) => g.west === r.west && r.z > g.z0 && r.z < g.z1 && d < g.dMax);
 
+  yield;
   // Rows every STEP m of z: shore x `s`, inland sign `sgn` (x = s + sgn * d) and the strip width W to the nearest raised
   // sidewalk block (cross-street gaps take their neighbours'), min-filtered then smoothed so lanes and belts flow along
   // the shore. landF(z) slides the highway from the river side (0) to the block side (1); the park belts take the rest.
@@ -2742,6 +2766,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
     });
   }
 
+  yield;
   // Lawn belts raised on granite curbs (or behind a coursed stone wall on the block side), open ends capped
   const lawn = makeAcc();
   const curbs = makeAcc();
@@ -2778,6 +2803,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
     });
   }
 
+  yield;
   // Black iron esplanade railing along the outer edge of the coping (alpha-tested pickets, uv.x = metres along)
   const fence = makeAcc();
   function railing(rows, d) {
@@ -2792,6 +2818,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
     });
   }
 
+  yield;
   // Trees: staggered, jittered rows across the belts (with glades), and a single row along the esplanade
   const MIX_PARK = [0.5, 0.3]; // London plane, honey locust, else elm / oak
   const MIX_RIVERSIDE = [0.35, 0.2];
@@ -2827,6 +2854,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
     }
   }
 
+  yield;
   // Twin-arm highway lights standing on the median barrier, arms across the carriageways
   const highwaySpots = [];
   function highwayLights(rows, offset) {
@@ -2844,6 +2872,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
   }
 
   // ---- Both shores ------------------------------------------------------------------------------------------------
+  yield;
   // West: Route 9A beside the blocks with Hudson River Park toward the river south of 59th St, then the Henry Hudson
   // Parkway along the river with Riverside Park inland. East: the FDR along the esplanade, moving inland behind East
   // River Park (12th St to Montgomery St) and Carl Schurz Park (84th to 90th St).
@@ -2862,6 +2891,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
   const westRows = sampleShore(true, CUT_Z + 40, WEST_END_Z, (z) => smooth(streetZ(66), streetZ(59) + 60, z));
   const eastRows = sampleShore(false, CUT_Z + 40, 6150, (z) =>
     Math.max(smooth(er0 - 60, er0, z) * (1 - smooth(er1 - 50, er1, z)), smooth(cs0 - 40, cs0, z) * (1 - smooth(cs1, cs1 + 40, z))));
+  yield;
   // South of VIA_Z the FDR leaves the strip for the South Street Viaduct: no at-grade carriageway or park belts there,
   // the esplanade carries on
   const VIA_Z = 4250;
@@ -2894,6 +2924,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
   }
 
   // ---- The South Street Viaduct (buildSouthStreetViaduct) -----------------------------------------------------------
+  yield;
   // From the at-grade centre line at VIA_Z, clear of the bridge piers & anchorages near the shore and of the buildings
   // and sheds standing from ~1.5 m out along the East River piers; park trees in its way are dropped, buildings.js
   // keeps its lots clear
@@ -2930,6 +2961,7 @@ function buildManhattanWaterfrontEdge(group, { blockSidewalks, treeSites, lawnMa
   fdrViaduct = viaduct;
 
   // ---- West St's Battery Park Underpass portal (buildUnderpassPortal) ---------------------------------------------
+  yield;
   // Over the last 42 m of Route 9A's carriageway, whose lanes go underground behind its dark screen and come up on the
   // South Street Viaduct (and vice versa); the park trees, lamps and highway lights in its way are dropped
   const zW = westRows[westRows.length - 1].z;

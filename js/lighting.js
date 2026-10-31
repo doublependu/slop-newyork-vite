@@ -128,7 +128,7 @@ const TIME_PRESETS = {
 };
 
 class LightingSystem {
-  constructor(scene, renderer = null) {
+  constructor(scene, renderer = null, { shadowTile = 3072 } = {}) {
     this.scene = scene;
     this.activePresetId = 'golden';
 
@@ -193,9 +193,9 @@ class LightingSystem {
     this.sunLight = new SunLight(0xffca92, 5.8);
     this.sunLight.position.copy(TIME_PRESETS.golden.sunDir);
     this.sunLight.castShadow = true;
-    // Two cascades share an atlas: use 3072px tiles when a 6144px texture fits, otherwise 2048px tiles.
+    // Two cascades share an atlas: use the level's tiles when a texture twice as wide fits, otherwise 2048px tiles.
     const maxTex = (renderer && renderer.backend && renderer.backend.device && renderer.backend.device.limits.maxTextureDimension2D) || 4096;
-    const tile = maxTex >= 6144 ? 3072 : 2048;
+    const tile = Math.min(shadowTile, maxTex >= 6144 ? 3072 : 2048);
     this.sunLight.shadow.mapSize.set(tile, tile);
     this.sunLight.shadow.camera.near = 0.5;
     this.sunLight.shadow.camera.far = 300;

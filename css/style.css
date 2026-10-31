@@ -48,6 +48,10 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* No browser pinch or double-tap zoom: a player has no way to zoom back out of the fixed HUD */
+  touch-action: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   background-color: #0a0b0d;
   color: var(--text);
   font-family: var(--font-sans);
@@ -118,8 +122,8 @@ kbd {
 #canvas-container {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   z-index: 1;
   cursor: grab;
 }
@@ -239,6 +243,169 @@ body::after {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+
+.project-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 18px;
+}
+
+.project-links a {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-underline-offset: 3px;
+  transition: color 0.2s ease;
+}
+
+.project-links a:hover,
+.project-links a:focus-visible {
+  color: var(--taxi);
+}
+
+@media (pointer: coarse) {
+  .project-links a { min-height: 44px; }
+}
+
+/* iOS zooms in on a focused field under 16px and doesn't zoom back out */
+@media (any-pointer: coarse) {
+  .fullmap-search { font-size: 16px; }
+}
+
+/* The downloaded copy has no need to offer itself */
+html[data-offline] .offline-link { display: none; }
+
+.loader-links {
+  max-width: min(420px, calc(100vw - 32px));
+  margin-top: 18px;
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+   Pause screen
+   ------------------------------------------------------------------------------------------------------------------ */
+.pause-menu {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(380px, calc(100% - 32px));
+  height: fit-content;
+  max-height: calc(100dvh - 24px);
+  padding: 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  color: var(--text);
+  text-align: center;
+  background: var(--grain), var(--glass-strong);
+  -webkit-backdrop-filter: blur(26px) saturate(170%);
+  backdrop-filter: blur(26px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow);
+}
+
+.pause-menu[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pause-menu::backdrop {
+  background: rgba(6, 6, 7, 0.55);
+}
+
+.pause-menu h2 {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.pause-resume,
+.pause-item {
+  flex: none;
+  min-height: 44px;
+  border-radius: var(--r-ctl);
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.pause-resume {
+  color: var(--taxi-ink);
+  background: var(--taxi);
+  border: 0;
+}
+
+.pause-item {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.pause-item[hidden] { display: none; }
+
+.pause-graphics {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.pause-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pause-levels button {
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--r-ctl);
+  cursor: pointer;
+}
+
+.pause-levels button[aria-pressed='true'] {
+  color: var(--taxi-ink);
+  background: var(--taxi);
+  border-color: var(--taxi);
+}
+
+.pause-note {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pause-foot {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pause-foot a { color: inherit; }
+
+/* Sits in the last free spot of a corner: the gutter under the speed cluster, above the loading screen too */
+#app-version {
+  position: fixed;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: max(4px, env(safe-area-inset-bottom));
+  z-index: 101;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+body.hud-minimized #app-version { display: none; }
 
 @keyframes loader-sweep {
   from { transform: translateX(-100%); }
@@ -525,9 +692,10 @@ body.hud-minimized .icon-show {
   margin: 0;
   padding: 6px;
   min-width: 264px;
-  max-height: calc(100vh - 2 * var(--edge) - 64px);
+  max-height: calc(100dvh - 2 * var(--edge) - 64px);
   overflow-y: auto;
   overscroll-behavior: contain;
+  touch-action: pan-y;
   scrollbar-width: thin;
   color: var(--text);
   background: var(--grain), var(--glass-strong);
@@ -1419,8 +1587,9 @@ body.touch-enabled .fullmap-header { top: max(var(--edge), env(safe-area-inset-t
 body.touch-enabled .map-controls .icon-btn { width: 44px; height: 44px; }
 body.touch-enabled .pop-item { min-height: 44px; }
 
-@media (max-width: 360px) {
-  body.touch-enabled .toolbar { width: 194px; height: auto; flex-wrap: wrap; justify-content: center; }
+@media (max-width: 520px) {
+  body.touch-enabled .toolbar { width: 300px; height: auto; flex-wrap: wrap; justify-content: center; }
+  body.touch-enabled .hud-top-left { top: calc(max(var(--edge), env(safe-area-inset-top)) + 114px); }
   body.touch-enabled .hud-bottom-right { top: calc(max(var(--edge), env(safe-area-inset-top)) + 114px); }
   .touch-look-hint { top: calc(max(var(--edge), env(safe-area-inset-top)) + 172px); }
 }
