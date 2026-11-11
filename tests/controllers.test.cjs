@@ -737,3 +737,147 @@ test('a helicopter settles on a roof and flies on from it', () => {
   heli.position.y = 120;
   assert.equal(controller.roofHeightAt(0, 0, heli.position.y), 0, 'a tower still above it is no roof to land on');
 });
+
+test('walk mode keeps curb step-offs grounded while real jumps arc and pin the contact shadow to the pavement', () => {
+  const { controller } = keyboardHarness({
+    ISLAND_BOUNDS: { minX: -1000, maxX: 1000, minZ: -1000, maxZ: 1000, sidewalkHeight: 0.22 },
+    CENTRAL_PARK_BOUNDS: { minX: 9999, maxX: 9999, minZ: 9999, maxZ: 9999 },
+    blockAt: (_x, z) => (z < 0 ? {} : null)
+  });
+  let maxRigAir = 0;
+  const shadow = {
+    position: { y: 0.02 },
+    scale: { x: 1, y: 1, z: 1, set(x, y, z) { this.x = x; this.y = y; this.z = z; } }
+  };
+  const person = {
+    type: 'person',
+    position: { x: 0, y: 0.22, z: -0.4 },
+    prevX: 0,
+    prevZ: -0.4,
+    heading: 0,
+    speed: 2.0,
+    verticalVel: 0,
+    jumping: false,
+    shadow,
+    mesh: { visible: true },
+    rig: { placed: true, update(_dt, _x, _z, _h, _g, _o, air) { maxRigAir = Math.max(maxRigAir, air); } },
+    crowd: { updates: 0, begin() {}, add() {}, end() {} }
+  };
+  controller.activeMode = 'person';
+  controller.colliders = [];
+  controller.entities = { person };
+  controller.keys.forward = true;
+
+  // Walk across the 0.22 m curb at z = 0: must stay grounded without triggering jump state
+  for (let i = 0; i < 30; i++) {
+    controller.updatePerson(1 / 60);
+    controller.poseCharacters(1 / 60, person.position);
+    assert.equal(person.jumping, false, 'stepping off a 0.22 m curb must not trigger jumping');
+  }
+  assert.equal(person.position.y, 0);
+  assert.equal(maxRigAir, 0, 'curb step-off passes air=0 so PersonRig steps down smoothly');
+
+  // Press jump: brief countermovement prep passes negative air to PersonRig, then person launches into the air and contact shadow stays at y = 0.02 in world space
+  let minRigAir = 0;
+  person.rig.update = (_dt, _x, _z, _h, _g, _o, air) => {
+    minRigAir = Math.min(minRigAir, air);
+    maxRigAir = Math.max(maxRigAir, air);
+  };
+  controller.keys.up = true;
+  controller.updatePerson(1 / 60);
+  controller.poseCharacters(1 / 60, person.position);
+  controller.keys.up = false;
+  assert.ok(person.jumpPrep > 0 && minRigAir < 0, 'jump initiates a brief countermovement wind-up before liftoff');
+  for (let i = 0; i < 20; i++) {
+    controller.updatePerson(1 / 60);
+    controller.poseCharacters(1 / 60, person.position);
+  }
+  assert.equal(person.jumping, true);
+  assert.ok(person.position.y > 0.5 && maxRigAir > 0.5, 'real jump lifts person and informs PersonRig');
+  assert.ok(Math.abs((person.position.y + shadow.position.y) - 0.02) < 1e-6, 'contact shadow stays on the ground beneath the jump');
+  assert.ok(shadow.scale.x < 0.85, 'contact shadow shrinks with jump height');
+});
+
+test('walk mode clamps phantom speed when blocked head-on by a building wall', () => {
+  const { controller } = keyboardHarness({
+    ISLAND_BOUNDS: { minX: -1000, maxX: 1000, minZ: -1000, maxZ: 1000, sidewalkHeight: 0.22 },
+    CENTRAL_PARK_BOUNDS: { minX: 9999, maxX: 9999, minZ: 9999, maxZ: 9999 },
+    blockAt: () => null
+  });
+  const person = {
+    type: 'person',
+    position: { x: 0, y: 0, z: -0.5 },
+    prevX: 0,
+    prevZ: -0.5,
+    heading: 0,
+    speed: 0,
+    verticalVel: 0,
+    jumping: false
+  };
+  controller.activeMode = 'person';
+  controller.colliders = [{ minX: -10, maxX: 10, minZ: 0, maxZ: 10, maxY: 30 }];
+  controller.entities = { person };
+  controller.keys.forward = true;
+
+  for (let i = 0; i < 120; i++) controller.updatePerson(1 / 60);
+  assert.ok(person.speed < 0.05, `wall-blocked pedestrian does not accumulate phantom sprint speed (got ${person.speed})`);
+
+  // Reversing away from the wall responds immediately on the next frame
+  controller.keys.forward = false;
+  controller.keys.backward = true;
+  controller.updatePerson(1 / 60);
+  assert.ok(person.speed < 0 && person.position.z < -0.48, 'pedestrian backs away from wall without waiting to bleed phantom speed');
+});
+
+test('cyclist braking stops briskly, pauses at zero before reversing, and supports Space handbrake', () => {
+  function bikeHarness(speed = 0, colliders = []) {
+    const { controller } = keyboardHarness({
+      ISLAND_BOUNDS: { minX: -1000, maxX: 1000, minZ: -1000, maxZ: 1000, sidewalkHeight: 0.22 },
+      CENTRAL_PARK_BOUNDS: { minX: 9999, maxX: 9999, minZ: 9999, maxZ: 9999 },
+      blockAt: () => null
+    });
+    const cyclist = {
+      type: 'cyclist',
+      position: { x: 0, y: 0, z: 0 },
+      heading: 0,
+      speed,
+      leanAngle: 0,
+      pedalPhase: 0,
+      leanPivot: { rotation: { z: 0 } },
+      frontWheel: { rotation: { x: 0 } },
+      rearWheel: { rotation: { x: 0 } },
+      crankPivot: { rotation: { x: 0 } },
+      pedals: []
+    };
+    controller.activeMode = 'cyclist';
+    controller.colliders = colliders;
+    controller.entities = { cyclist };
+    controller.getGroundHeight = () => 0;
+    return { controller, cyclist };
+  }
+
+  // Holding S from cruising speed (12 m/s) stops in ~6.5 m and pauses cleanly at 0 before backing up
+  const sBrake = bikeHarness(12);
+  sBrake.controller.keys.backward = true;
+  for (let i = 0; i < 72; i++) sBrake.controller.updateCyclist(1 / 60); // 1.2 s
+  assert.equal(sBrake.cyclist.speed, 0, 'S brake brings the bicycle to a clean stop without immediately reversing');
+  assert.ok(sBrake.cyclist.position.z > 5.5 && sBrake.cyclist.position.z < 7.5,
+    `bicycle stops within ~6.5 m from 12 m/s (got ${sBrake.cyclist.position.z.toFixed(2)} m)`);
+
+  // Continuing to hold S past the brief stop hold engages gentle reverse
+  for (let i = 0; i < 30; i++) sBrake.controller.updateCyclist(1 / 60);
+  assert.ok(sBrake.cyclist.speed < -0.5, 'continuing to hold S after stopping backs the bike up');
+
+  // Holding Space (keys.up) brakes to a complete stop and never reverses
+  const handbrake = bikeHarness(15);
+  handbrake.controller.keys.up = true;
+  for (let i = 0; i < 150; i++) handbrake.controller.updateCyclist(1 / 60);
+  assert.equal(handbrake.cyclist.speed, 0, 'Space handbrake stops at zero and never reverses');
+  assert.ok(handbrake.cyclist.position.z < 11.5, 'Space handbrake stops crisply from high speed');
+
+  // Wall-blocked cyclist clamps phantom speed so braking/reversing away works immediately
+  const blocked = bikeHarness(0, [{ minX: -10, maxX: 10, minZ: 0.5, maxZ: 10, maxY: 30 }]);
+  blocked.controller.keys.forward = true;
+  for (let i = 0; i < 120; i++) blocked.controller.updateCyclist(1 / 60);
+  assert.ok(blocked.cyclist.speed < 0.05, `wall-blocked cyclist clamps phantom speed (got ${blocked.cyclist.speed})`);
+});

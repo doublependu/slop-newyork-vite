@@ -78,7 +78,8 @@ async function readDevice() {
     coarse: matchMedia('(pointer: coarse)').matches,
     saveData: navigator.connection?.saveData === true,
     devicePixelRatio: window.devicePixelRatio || 1,
-    pixels: screen.width * screen.height * Math.min(window.devicePixelRatio || 1, 1.5) ** 2
+    pixels: screen.width * screen.height * Math.min(window.devicePixelRatio || 1, 1.5) ** 2,
+    firefox: /Firefox\//.test(navigator.userAgent)
   };
   try {
     const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
@@ -97,6 +98,8 @@ async function detectQuality() {
   return {
     ...LEVELS[picked.level],
     ...picked,
+    // Firefox stalls resolving the multisampled floating-point targets of the post-processing chain
+    msaa: LEVELS[picked.level].msaa && !device.firefox,
     pixelRatio: pixelRatioFor(picked.level, device) * picked.pixelScale
   };
 }

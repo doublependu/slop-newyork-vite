@@ -27,18 +27,44 @@ async function initApp() {
   const container = document.getElementById('canvas-container');
   const loadingOverlay = document.getElementById('loading-overlay');
   const loadingStatus = document.getElementById('loading-status');
-  const loadingTrack = loadingOverlay ? loadingOverlay.querySelector('.loader-track') : null;
   const loadingFill = document.getElementById('loading-progress');
-  // Only shader compilation has measurable progress; other stages use the sweeping bar.
-  const setLoadingProgress = (p) => {
+
+  // One progress bar for the whole start-up. Each stage fills a share of it sized after its typical duration (the
+  // "[init]" timings logged below, from `npm run bench` on the desktop profile; `data` is fetching the code and data
+  // before this runs, which the stylesheet animates). The fill glides through a stage as a compositor transition, so it
+  // keeps moving while the stage's synchronous work blocks the main thread, at the pace the earlier stages ran at on
+  // this machine.
+  const STAGE_MS = {
+    data: 360, renderer: 80, lighting: 60, cityGrid: 270, controllers: 40, blocks: 80, ui: 30, postFX: 40,
+    compile: 600, warmup: 260, gpu: 630
+  };
+  const stageNames = Object.keys(STAGE_MS);
+  const totalStageMs = stageNames.reduce((sum, name) => sum + STAGE_MS[name], 0);
+  const loadingStartedAt = performance.now();
+  let loadingStage = { from: 0, to: STAGE_MS.data / totalStageMs };
+
+  const setLoadingProgress = (p, seconds = 0.3) => {
     if (!loadingFill) return;
-    if (loadingTrack) loadingTrack.classList.remove('is-indeterminate');
+    loadingFill.style.animation = 'none';
+    loadingFill.style.transition = `transform ${seconds}s ${seconds > 0.3 ? 'linear' : 'ease'}`;
     loadingFill.style.transform = `scaleX(${Math.min(1, Math.max(0, p))})`;
   };
+  // Progress through the current stage, for stages that can measure it
+  const setStageProgress = (f) => setLoadingProgress(loadingStage.from + (loadingStage.to - loadingStage.from) * f);
 
-  async function showLoadingStage(message) {
+  function beginLoadingStage(message, name, glide = true) {
     if (loadingStatus) loadingStatus.textContent = message;
-    if (loadingTrack) loadingTrack.classList.add('is-indeterminate');
+    const index = stageNames.indexOf(name);
+    const before = stageNames.slice(0, index).reduce((sum, n) => sum + STAGE_MS[n], 0);
+    loadingStage = { from: before / totalStageMs, to: (before + STAGE_MS[name]) / totalStageMs };
+    if (!glide) return setLoadingProgress(loadingStage.from);
+    const ranMs = before - STAGE_MS.data;
+    const pace = ranMs >= 300 ? Math.min(4, Math.max(0.5, (performance.now() - loadingStartedAt) / ranMs)) : 1;
+    setLoadingProgress(loadingStage.to, (STAGE_MS[name] * pace) / 1000);
+  }
+
+  async function showLoadingStage(message, name, glide) {
+    beginLoadingStage(message, name, glide);
     if (document.hidden) return;
     // Let the label paint before synchronous work. The timeout also lets hidden tabs keep loading.
     await new Promise((resolve) => {
@@ -61,7 +87,7 @@ async function initApp() {
     document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
   }
 
-  await showLoadingStage('Initializing graphics...');
+  await showLoadingStage('Initializing graphics...', 'renderer');
 
   // 1. Pick the graphics level, then initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer
   const quality = await detectQuality();
@@ -94,14 +120,14 @@ async function initApp() {
   markInit('renderer');
 
   // 2. Scene, atmosphere and lighting
-  await showLoadingStage('Creating sky and environment lighting...');
+  await showLoadingStage('Creating sky and environment lighting...', 'lighting');
   const scene = new THREE.Scene();
   const lightingSystem = new LightingSystem(scene, renderer, { shadowTile: quality.shadowTile || 1024 });
   markInit('lighting');
 
   // 3. The starting view: water, roads, sidewalks, landmarks and the buildings around the player. Everything else
   //    continues behind the game (buildRestOfWorld below) so the player can move as soon as possible.
-  await showLoadingStage('Building streets and sidewalks...');
+  await showLoadingStage('Building streets and sidewalks...', 'cityGrid');
   await fontsReady;
   const lightPools = createLightPools(scene);
   const gridStage = new THREE.Group();
@@ -113,7 +139,7 @@ async function initApp() {
   markInit('landmarks');
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
-  await showLoadingStage('Preparing player, vehicles and controls...');
+  await showLoadingStage('Preparing player, vehicles and controls...', 'controllers');
   const controllerManager = new ThirdPersonControllerManager(scene, []);
   controllerManager.addColliders(landmarkColliders);
   // Reuse teleport placement so saved players return at rest, close to their last positions.
@@ -131,7 +157,7 @@ async function initApp() {
   } catch { /* Missing or unavailable storage does not prevent playing. */ }
   markInit('controllers');
 
-  await showLoadingStage('Raising the nearest buildings...');
+  await showLoadingStage('Raising the nearest buildings...', 'blocks');
   const blocksStage = new THREE.Group();
   const cityBlocksJob = buildCityBlocks(scene, blocksStage, landmarkColliders, controllerManager.getActiveEntity().position);
   const cityBlocks = runUntilReady(cityBlocksJob);
@@ -202,7 +228,7 @@ async function initApp() {
 
   // 5. TSL RenderPipeline with Half-Res Screen Space Reflections (SSRNode), Bloom & Filmic Toning
   //    Fade out distant and matte surfaces so SSR spends its rays on visible glossy reflections.
-  await showLoadingStage('Setting up visual effects, map and interface...');
+  await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const scenePass = pass(scene, cameraSystem.camera);
   // The multisampled colour attachments (output, normal, metalRough) only need resolving, never storing: discarding
   // them spares the GPU writing 3 x 4 samples per pixel to memory every frame (transient, memoryless attachments where
@@ -335,7 +361,7 @@ async function initApp() {
   const controlHints = {
     person: [[['W', 'S'], 'Walk / Run'], [['A', 'D'], 'Turn'], [['Space'], 'Jump'], [['Drag'], 'Orbit']],
     car: [[['W', 'S'], 'Drive / Reverse'], [['A', 'D'], 'Steer'], [['B'], 'Horn'], [['Drag'], 'Orbit']],
-    cyclist: [[['W', 'S'], 'Pedal / Brake'], [['A', 'D'], 'Lean & Turn'], [['Drag'], 'Orbit']],
+    cyclist: [[['W', 'S'], 'Pedal / Brake'], [['Space'], 'Brake'], [['A', 'D'], 'Lean & Turn'], [['Drag'], 'Orbit']],
     helicopter: [[['W', 'S'], 'Pitch'], [['A', 'D'], 'Yaw'], [['Space', 'E'], 'Ascend'], [['Q', 'C'], 'Descend']]
   };
   // Top speeds in mph (controllers.js caps them at 8.2, 36, 19 & 52 m/s): full scale of the speed meter
@@ -749,7 +775,7 @@ async function initApp() {
   }
 
   async function precompileShaders() {
-    await showLoadingStage('Preparing the view...');
+    await showLoadingStage('Preparing the view...', 'postFX');
     // An empty frame first: it sets up the post-processing chain, which configures the scene pass's render target
     // (MSAA samples, depth format), so the pipelines compiled below are the very ones the scene pass asks for
     scene.visible = false;
@@ -761,8 +787,7 @@ async function initApp() {
     const { now, later } = collectCompileJobs(scene);
     laterCompileJobs = later;
 
-    await showLoadingStage(`Compiling scene shaders... 0 / ${now.length} batches`);
-    setLoadingProgress(0);
+    await showLoadingStage(`Compiling scene shaders... 0 / ${now.length} batches`, 'compile', false);
     setCompileTarget(true);
     let next = 0;
     let done = 0;
@@ -779,7 +804,7 @@ async function initApp() {
         if (loadingStatus) {
           loadingStatus.textContent = `Compiling scene shaders... ${done} / ${now.length} batches (${Math.round((done / now.length) * 100)}%)`;
         }
-        setLoadingProgress(done / now.length);
+        setStageProgress(done / now.length);
       }
     };
     await Promise.all(Array.from({ length: COMPILE_POOL }, worker));
@@ -788,7 +813,7 @@ async function initApp() {
 
   await precompileShaders();
   markInit('compile');
-  await showLoadingStage('Preparing shadows and the first frame...');
+  await showLoadingStage('Preparing shadows and the first frame...', 'warmup');
 
   // Runs between frames once the game is interactive, a few objects per frame, so that a shader nobody has reached yet
   // doesn't stall the moment the player turns towards it.
@@ -868,7 +893,6 @@ async function initApp() {
     yield revealStage(trafficStage);
     trafficSystem = traffic;
     highwayTraffic = highway;
-    mapSystem.trafficSystem = traffic;
     audioSystem.attachCity({ trafficSystem, highwayTraffic, streetDetails });
     dynamicRoots.push(trafficSystem.group, highwayTraffic.group);
 
@@ -1019,7 +1043,7 @@ async function initApp() {
       markInit('firstFrame');
       // The loading screen stays up until the GPU has got through the first frame, i.e. until the city is on screen
       const device = renderer.backend.device;
-      if (loadingStatus) loadingStatus.textContent = 'Waiting for graphics to finish the first frame...';
+      beginLoadingStage('Waiting for graphics to finish the first frame...', 'gpu');
       Promise.resolve(device && device.queue.onSubmittedWorkDone()).catch(() => {}).then(() => {
         markInit('gpu');
         console.log(`[init] ${initTimings.map(([label, ms]) => `${label} ${ms}ms`).join(', ')}`);

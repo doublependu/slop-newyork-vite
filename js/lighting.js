@@ -132,12 +132,7 @@ class LightingSystem {
     this.scene = scene;
     this.activePresetId = 'golden';
 
-    // Register SunLight with either supported Three.js light-node API.
-    if (SunLight.registerNode) {
-      SunLight.registerNode(SunLightNode);
-    } else if (renderer && renderer.library) {
-      renderer.library.addLight(SunLightNode, SunLight);
-    }
+    SunLight.registerNode(SunLightNode);
 
     this.scene.fog = new THREE.FogExp2(0xdcc5ae, 0.00024);
     // Leave scene.background = null because SkyMesh renders the 360° sky dome, and setting
@@ -198,10 +193,27 @@ class LightingSystem {
     const tile = Math.min(shadowTile, maxTex >= 6144 ? 3072 : 2048);
     this.sunLight.shadow.mapSize.set(tile, tile);
     this.sunLight.shadow.camera.near = 0.5;
-    this.sunLight.shadow.camera.far = 300;
+    this.sunLight.shadow.camera.far = 220;
     // Suppress shadow acne along the surface normal in world units
     // so short casters like cars, curbs, tree trunks, and pedestrians keep crisp contact shadows
     this.sunLight.shadow.normalBias = 0.05;
+    // SunLightShadow raises its caster ceiling by camera.far (220 m), which slices tall skyscrapers (up to One WTC
+    // at 541 m) when their shadows reach several blocks downstream. Shift each cascade camera upstream along its
+    // local +Z (sun) axis so every Manhattan tower stays in front of the cascade near plane at any sun elevation.
+    const origUpdateMatrices = this.sunLight.shadow.updateMatrices;
+    this.sunLight.shadow.updateMatrices = function (light, viewCamera) {
+      if (viewCamera === undefined) return;
+      origUpdateMatrices.call(this, light, viewCamera);
+      const extra = Math.ceil(550 / Math.max(0.25, this.getCamera(0).matrixWorld.elements[9]));
+      for (let i = 0; i < this.getViewportCount(); i++) {
+        const cam = this.getCamera(i);
+        cam.translateZ(extra);
+        cam.far += extra;
+        cam.updateProjectionMatrix();
+        cam.updateMatrixWorld();
+        this._updateMatrix(cam, this._matrices[i], this._frustums[i], this._viewports[i]);
+      }
+    };
     this.scene.add(this.sunLight);
 
     // Subtle Hemisphere Sky + Warm Terracotta/Limestone Ground Bounce Fill
@@ -301,7 +313,7 @@ class LightingSystem {
     // logarithmic split (the near cascade ends at ~far / 4). Keep far at 300 m at street level so the near cascade
     // stays sharp, and expand it with altitude (helicopter / observatory) so shadows reach all the way down to street level.
     const altitude = focusPos && Number.isFinite(focusPos.y) ? Math.max(0, focusPos.y) : 0;
-    this.sunLight.shadow.camera.far = Math.max(300, Math.min(720, 260 + altitude * 1.6));
+    this.sunLight.shadow.camera.far = Math.max(220, Math.min(600, 200 + altitude * 1.5));
   }
 }
 

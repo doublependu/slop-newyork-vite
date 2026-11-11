@@ -49,7 +49,7 @@ function createPostProcessing(renderer, sceneColor, reflections, { bloom: useBlo
     const bloomInput = vec4(exposed.mul(float(8.0).div(max(peak, 8.0))), 1.0);
     bloomPass = bloom(bloomInput, 0.24, 0.40, 1.20);
     bloomPass.smoothWidth.value = 0.30;
-    bloomPass.setResolutionScale(0.5);
+    bloomPass.setResolutionScale(0.35);
   }
 
   const outputNode = Fn(() => {
